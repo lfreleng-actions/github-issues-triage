@@ -501,9 +501,12 @@ workflow, not a reusable one, so much of the skeleton does not apply.
 - `.github/workflows/build-test.yaml`
 - `.github/workflows/build-test-release.yaml`
 - `.github/workflows/merge.yaml`
-- `.github/workflows/testing.yaml` — exercises the removed
-  `build-test.yaml` skeleton by local path and nothing else; a
-  triage-specific test workflow is future work
+- `.github/workflows/testing.yaml` — the template version
+  exercised the removed `build-test.yaml` skeleton; **replaced** by
+  a triage-specific test: every pull request runs the reusable
+  workflow in dry-run + retriage mode, with edit verbs withheld,
+  using the PR head's assets — proving the full plumbing without
+  touching any issue (fork PRs skip it: no secrets)
 - `examples/` (build-test-release / merge examples)
 
 ### Import from `actions-template`
@@ -522,9 +525,11 @@ workflow, not a reusable one, so much of the skeleton does not apply.
 docs/design.md                               # this document
 prompt/triage.md                             # the agent's triage policy
 config/excluded-repos.txt                    # repos the scan skips
+scripts/snapshot.sh                          # issue-state capture
 scripts/triage_report.py                     # snapshot diff -> report
 .github/workflows/issues-triage.yaml         # reusable (workflow_call)
 .github/workflows/issues-triage-cron.yaml    # scheduled thin caller
+.github/workflows/testing.yaml               # PR dry-run of the above
 README.md                                    # rewritten for this repo
 ```
 

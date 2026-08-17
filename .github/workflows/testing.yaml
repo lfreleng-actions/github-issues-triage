@@ -1,0 +1,60 @@
+---
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Linux Foundation
+
+# Exercises the reusable issues-triage workflow on pull requests,
+# in read-only form: dry_run removes gh issue edit from the agent's
+# tool set and instructs it to report the labels it would apply
+# instead of applying them. Retriage mode makes the run meaningful
+# even when the backlog is clean (a labelled backlog would
+# otherwise short-circuit before the agent session), so every PR
+# proves the full plumbing: snapshots, prompt assembly, the agent
+# session, transcript capture, diff report, and artefact upload.
+#
+# The reusable workflow and its assets (prompt, scripts) come from
+# the PR head, so the run validates the changes under review.
+#
+# Fork PRs skip the job: repository secrets (the Anthropic API key)
+# are unavailable to them by GitHub's security model.
+name: 'Testing 🧪'
+
+# yamllint disable-line rule:truthy
+on:
+  pull_request:
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: "testing-${{ github.ref }}"
+  cancel-in-progress: true
+
+jobs:
+  triage-dry-run:
+    name: 'Triage dry-run'
+    # yamllint disable rule:line-length
+    if: >
+      github.event_name == 'workflow_dispatch' ||
+      (github.event_name == 'pull_request' && !github.event.pull_request.head.repo.fork)
+    # yamllint enable rule:line-length
+    permissions:
+      issues: write
+      contents: read
+    uses: ./.github/workflows/issues-triage.yaml
+    with:
+      org: 'lfreleng-actions'
+      # Read-only: report proposed labels, apply nothing.
+      dry_run: true
+      # Re-examine labelled issues so the agent session always runs
+      # and the report always carries proposals to inspect.
+      retriage: true
+      # Bound the session cost on PR runs.
+      max_turns: '40'
+      egress_policy: 'audit'
+      assets_repository: >-
+        ${{ github.event.pull_request.head.repo.full_name
+        || github.repository }}
+      assets_ref: >-
+        ${{ github.event.pull_request.head.sha || github.sha }}
+    secrets:
+      anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
