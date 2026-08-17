@@ -247,10 +247,13 @@ inlining it in YAML.
 
 ## 7. Workflow Design
 
-`.github/workflows/issues-triage.yaml`:
+The job below lives in the **reusable** workflow
+(`issues-triage.yaml`); the scheduled caller
+(`issues-triage-cron.yaml`) contributes the triggers and org
+secrets. See §7.3 for the split.
 
 ```text
-Triggers:
+Triggers (caller):
   schedule: '0 7 * * 1-5'      # 07:00 UTC, Mon-Fri
   workflow_dispatch:            # manual runs
     inputs:
@@ -295,7 +298,9 @@ Design points:
 
 ### 7.1 Egress (harden-runner)
 
-The org allow-list
+The org runs `step-security/harden-runner` in **block** mode, with
+`harden-runner-block-action` loading the allow-list from the newest
+tagged file in the `.github` special repository. The org allow-list
 (`.github/harden-runner/lfreleng-actions/allow_list.txt`) contains
 **no Anthropic endpoints** today. Required additions:
 
@@ -304,9 +309,18 @@ api.anthropic.com:443
 ```
 
 plus whatever telemetry/statsig endpoints the pinned Claude Code
-release requires (discover these by first running the workflow with
-`egress-policy: audit` and harvesting the report — the same procedure
-used for other org tooling). Whether these belong in the shared
+release requires. The rollout sequence:
+
+1. The reusable workflow exposes an `egress_policy` input
+   (default `audit`), passed straight to harden-runner.
+2. Initial scheduled runs use **audit** mode; the harden-runner
+   report captures the agent session's outbound endpoints.
+3. A PR against `lfreleng-actions/.github` adds those endpoints to
+   the allow-list.
+4. The org caller flips `egress_policy` to **block**, with
+   `harden-runner-block-action` loading the updated tagged list.
+
+Whether the endpoints belong in the shared
 baseline or in a **supplemental per-repo allow-list** is the
 question of [`lfreleng-actions/.github#161`](https://github.com/lfreleng-actions/.github/issues/161);
 if that lands first, use it — an Anthropic API grant is a
@@ -413,6 +427,56 @@ must show the **before/after** movement as well as the actions taken:
 - The next morning's security report independently verifies the
   outcome: its Untriaged column is the external metric of success.
 
+### 7.3 Modular consumption (reusable workflow)
+
+The pipeline splits into a **reusable workflow** carrying the whole
+job, and a **thin scheduled caller** carrying org-specific choices.
+This mirrors the `generic-workflows` pattern the org already uses,
+and lets other organisations (or individuals) consume the pipeline
+by supplying their own tokens — no fork required.
+
+<!-- markdownlint-disable MD013 -->
+
+| File | Role |
+| ---- | ---- |
+| `.github/workflows/issues-triage.yaml` | Reusable (`workflow_call`): the full triage job |
+| `.github/workflows/issues-triage-cron.yaml` | Org caller: schedule, dispatch inputs, secrets |
+
+<!-- markdownlint-enable MD013 -->
+
+Interface of the reusable workflow:
+
+<!-- markdownlint-disable MD013 -->
+
+| Input | Default | Purpose |
+| ----- | ------- | ------- |
+| `org` | (required) | GitHub organisation or user to triage |
+| `model` | `claude-opus-5` | Model passed to Claude Code |
+| `dry_run` | `true` | Report intended labels; apply nothing |
+| `retriage` | `false` | Re-examine issues that carry labels |
+| `repository` | `''` | Restrict the scan to one repository |
+| `exclude_repos` | `''` | Comma-separated repositories to skip |
+| `max_turns` | `80` | Agent session turn ceiling |
+| `egress_policy` | `audit` | harden-runner mode (`audit`/`block`) |
+| `egress_allow_config` | `''` | `harden-runner-block-action` config coordinate (block mode) |
+| `github_app_client_id` | `''` | App auth; falls back to `github.token` when empty |
+| `assets_repository` | this repo | Where to fetch the prompt and report script |
+| `assets_ref` | `main` | Ref of `assets_repository` to fetch |
+
+| Secret | Required | Purpose |
+| ------ | -------- | ------- |
+| `anthropic_api_key` | yes | Anthropic API authentication |
+| `github_app_private_key` | no | Pairs with `github_app_client_id` |
+
+<!-- markdownlint-enable MD013 -->
+
+Defaults favour safe onboarding: a first-time consumer gets a
+dry-run in audit mode scoped by their own token. The fallback to
+`github.token` means a single-repository consumer needs no App at
+all — the default token can label issues in its own repository.
+Cross-repo triage needs the App (or a PAT passed as the private-key
+secret alternative, discouraged per §5.2).
+
 ## 8. Repository Layout
 
 This repository started from `workflows-template`, which
@@ -423,9 +487,13 @@ workflow, not a reusable one, so much of the skeleton does not apply.
 
 - `.pre-commit-config.yaml`, `.gitlint`, `.yamllint`, `.editorconfig`,
   `.ruff.toml`, `.gitignore` — org-standard linting
+- `.github/workflows/release.yaml` — **required**: promotes draft
+  releases to full releases on tag push (thin caller for the
+  `generic-workflows` release reusable)
 - `.github/workflows/openssf-scorecard.yaml`, `release-drafter.yaml`,
-  `testing.yaml`, `clear-action-cache.yaml`
+  `clear-action-cache.yaml`
 - `.github/actionlint.yaml`, `.github/dependabot.yml`
+- `.readthedocs.yml` — kept: this repository now carries `docs/`
 - `LICENSES/`, `SECURITY.md`
 
 ### Remove (template skeletons that do not apply)
@@ -433,9 +501,10 @@ workflow, not a reusable one, so much of the skeleton does not apply.
 - `.github/workflows/build-test.yaml`
 - `.github/workflows/build-test-release.yaml`
 - `.github/workflows/merge.yaml`
-- `.github/workflows/release.yaml`
+- `.github/workflows/testing.yaml` — exercises the removed
+  `build-test.yaml` skeleton by local path and nothing else; a
+  triage-specific test workflow is future work
 - `examples/` (build-test-release / merge examples)
-- `.readthedocs.yml` (unless we later publish these docs)
 
 ### Import from `actions-template`
 
@@ -450,10 +519,13 @@ workflow, not a reusable one, so much of the skeleton does not apply.
 ### Add (new)
 
 ```text
-docs/design.md                          # this document
-prompt/triage.md                        # the agent's triage policy prompt
-.github/workflows/issues-triage.yaml    # the scheduled pipeline
-README.md                               # rewritten for this repo
+docs/design.md                               # this document
+prompt/triage.md                             # the agent's triage policy
+config/excluded-repos.txt                    # repos the scan skips
+scripts/triage_report.py                     # snapshot diff -> report
+.github/workflows/issues-triage.yaml         # reusable (workflow_call)
+.github/workflows/issues-triage-cron.yaml    # scheduled thin caller
+README.md                                    # rewritten for this repo
 ```
 
 ## 9. Failure Modes and Mitigations
@@ -492,10 +564,10 @@ README.md                               # rewritten for this repo
    `test-tags-semantic`; the triage prompt should honour the same
    exclusion list. Share it via a config file in this repo rather
    than hard-coding in the prompt.
-6. **Transcript output contract** — confirm the pinned
-   `claude-code-action` release's output name/path for the structured
-   execution log (`execution_file` in earlier releases); the artefact
-   step in §7.2 depends on it.
+6. **Transcript output contract** — resolved: `claude-code-action`
+   v1 (verified at v1.0.193) exposes the structured execution log
+   path as the `execution_file` output; the artefact step in §7.2
+   consumes it.
 
 ## 11. Rollout Plan
 
