@@ -1,0 +1,268 @@
+---
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Linux Foundation
+
+# Reusable AI issues-triage workflow.
+#
+# Scans the open issues of an organisation (or a single repository),
+# runs a Claude Code agent session that applies category labels per
+# the bundled prompt/triage.md policy, and attaches full run
+# evidence to the workflow run: before/after issue snapshots, the
+# complete agent session transcript, and a diff-based report that
+# also lands in the step summary.
+#
+# Consumers outside this organisation supply their own tokens: an
+# Anthropic API key, and either a GitHub App (client id input plus
+# private-key secret) for cross-repository triage, or nothing, in
+# which case the workflow falls back to the caller's github.token
+# and labels issues in the calling repository alone.
+#
+# Defaults favour safe onboarding: dry_run (report, change nothing)
+# and egress_policy audit. See docs/design.md for the full design.
+name: 'Issues Triage [R] 🏷️'
+
+# yamllint disable-line rule:truthy
+on:
+  workflow_call:
+    inputs:
+      org:
+        description: 'GitHub organisation or user to triage'
+        required: true
+        type: string
+      model:
+        description: 'Model passed to Claude Code'
+        type: string
+        default: 'claude-opus-5'
+      dry_run:
+        description: 'Report intended labels; apply nothing'
+        type: boolean
+        default: true
+      retriage:
+        description: 'Re-examine issues that carry labels'
+        type: boolean
+        default: false
+      repository:
+        description: 'Restrict the scan to one repository'
+        type: string
+        default: ''
+      exclude_repos:
+        description: 'Comma-separated repos to skip (overrides bundled list)'
+        type: string
+        default: ''
+      max_turns:
+        description: 'Agent session turn ceiling'
+        type: string
+        default: '80'
+      egress_policy:
+        description: 'harden-runner egress mode: audit or block'
+        type: string
+        default: 'audit'
+      egress_allow_config:
+        description: 'harden-runner-block-action config coordinate'
+        type: string
+        default: ''
+      github_app_client_id:
+        description: 'GitHub App client id; empty uses github.token'
+        type: string
+        default: ''
+      assets_repository:
+        description: 'Repository providing the prompt and scripts'
+        type: string
+        default: 'lfreleng-actions/github-issues-triage'
+      assets_ref:
+        description: 'Ref of assets_repository to fetch'
+        type: string
+        default: 'main'
+    secrets:
+      anthropic_api_key:
+        description: 'Anthropic API key for the agent session'
+        required: true
+      github_app_private_key:
+        description: 'GitHub App private key (with github_app_client_id)'
+        required: false
+
+permissions: {}
+
+jobs:
+  triage:
+    name: 'Triage'
+    runs-on: 'ubuntu-latest'
+    timeout-minutes: 30
+    permissions:
+      # The fallback-token path reads and labels issues in the
+      # calling repository; the App-token path carries its own
+      # org-wide issues:write permission independent of these.
+      issues: write
+      contents: read
+    steps:
+      # Load an egress allow-list for block mode. In audit mode the
+      # step does not run and harden-runner records outbound calls
+      # without blocking, the mode used to harvest the endpoint list.
+      - name: 'Load egress allow-list'
+        if: inputs.egress_policy == 'block'
+        # yamllint disable-line rule:line-length
+        uses: lfreleng-actions/harden-runner-block-action@6db537b3e6d060c3287c5a3ce2c28b55b0af330d # v0.2.1
+        with:
+          config: "${{ inputs.egress_allow_config }}"
+
+      - name: 'Harden runner'
+        # yamllint disable-line rule:line-length
+        uses: step-security/harden-runner@b09bb98e06d4d774595224525879c09bc6e98c40 # v2.20.1
+        with:
+          egress-policy: "${{ inputs.egress_policy }}"
+          allowed-endpoints: >
+            ${{ env.CONNECTION_ALLOW_LIST }}
+
+      - name: 'Mint GitHub App token 🔑'
+        id: app-token
+        if: inputs.github_app_client_id != ''
+        # yamllint disable-line rule:line-length
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          client-id: "${{ inputs.github_app_client_id }}"
+          private-key: "${{ secrets.github_app_private_key }}"
+          owner: "${{ inputs.org }}"
+          permission-issues: 'write'
+          permission-metadata: 'read'
+
+      - name: 'Checkout triage assets 🛎️'
+        # yamllint disable-line rule:line-length
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: "${{ inputs.assets_repository }}"
+          ref: "${{ inputs.assets_ref }}"
+          path: 'triage-assets'
+          persist-credentials: false
+
+      - name: 'Snapshot issues (before) 📸'
+        id: before
+        env:
+          GH_TOKEN: "${{ steps.app-token.outputs.token || github.token }}"
+          ORG: "${{ inputs.org }}"
+          REPOSITORY: "${{ inputs.repository }}"
+          EXCLUDE_REPOS: "${{ inputs.exclude_repos }}"
+          EXCLUDE_FILE: 'triage-assets/config/excluded-repos.txt'
+        run: |
+          bash triage-assets/scripts/snapshot.sh artefacts/before.json
+          pending=$(jq 'map(select(.labels == [])) | length' \
+            artefacts/before.json)
+          echo "pending=$pending" >> "$GITHUB_OUTPUT"
+          echo "Unlabelled issues pending: $pending"
+
+      # Skip the (costly) agent session when the backlog is clear.
+      # Retriage mode always runs it: labelled issues are in scope.
+      - name: 'Assemble prompt 📝'
+        id: prompt
+        if: steps.before.outputs.pending != '0' || inputs.retriage
+        env:
+          ORG: "${{ inputs.org }}"
+          DRY_RUN: "${{ inputs.dry_run }}"
+          RETRIAGE: "${{ inputs.retriage }}"
+          REPOSITORY: "${{ inputs.repository }}"
+        run: |
+          {
+            cat triage-assets/prompt/triage.md
+            echo ""
+            echo "## Runtime context"
+            echo ""
+            echo "- Target organisation: $ORG"
+            if [ -n "$REPOSITORY" ]; then
+              echo "- Restrict the scan to repository: $REPOSITORY"
+            fi
+            if [ "$DRY_RUN" = "true" ]; then
+              echo "- Mode: DRY RUN. Do not run gh issue edit." \
+                "Report the labels you would apply instead."
+            else
+              echo "- Mode: live. Apply labels with gh issue edit."
+            fi
+            if [ "$RETRIAGE" = "true" ]; then
+              echo "- Retriage mode: re-examine labelled issues too."
+            fi
+            echo "- Excluded repositories (skip entirely):"
+            sed 's/^/    - /' artefacts/excluded-repos.txt
+          } > artefacts/prompt.md
+          {
+            echo "prompt<<TRIAGE_PROMPT_EOF"
+            cat artefacts/prompt.md
+            echo "TRIAGE_PROMPT_EOF"
+          } >> "$GITHUB_OUTPUT"
+          tools="Bash(gh search issues:*),Bash(gh issue list:*)"
+          tools="$tools,Bash(gh issue view:*),Bash(gh label list:*)"
+          if [ "$DRY_RUN" != "true" ]; then
+            tools="$tools,Bash(gh issue edit:*)"
+          fi
+          echo "tools=$tools" >> "$GITHUB_OUTPUT"
+
+      - name: 'Run triage agent 🤖'
+        id: agent
+        if: steps.before.outputs.pending != '0' || inputs.retriage
+        # yamllint disable-line rule:line-length
+        uses: anthropics/claude-code-action@9d7150bc8a3dae8149739a88019d192b579ad90c # v1.0.193
+        env:
+          GH_TOKEN: "${{ steps.app-token.outputs.token || github.token }}"
+        with:
+          anthropic_api_key: "${{ secrets.anthropic_api_key }}"
+          github_token: >-
+            ${{ steps.app-token.outputs.token || github.token }}
+          prompt: "${{ steps.prompt.outputs.prompt }}"
+          claude_args: >-
+            --model ${{ inputs.model }}
+            --max-turns ${{ inputs.max_turns }}
+            --allowedTools "${{ steps.prompt.outputs.tools }}"
+
+      # Preserve the full session transcript for debugging, whatever
+      # the session outcome. The failure cases are precisely the runs
+      # that need it.
+      - name: 'Preserve session transcript 📜'
+        if: always() && steps.before.outcome == 'success'
+        env:
+          EXECUTION_FILE: "${{ steps.agent.outputs.execution_file }}"
+        run: |
+          if [ -n "$EXECUTION_FILE" ] && [ -f "$EXECUTION_FILE" ]; then
+            cp "$EXECUTION_FILE" artefacts/session-transcript.json
+            echo "Transcript preserved from: $EXECUTION_FILE"
+          else
+            echo "No execution file to preserve"
+          fi
+
+      - name: 'Snapshot issues (after) 📸'
+        if: always() && steps.before.outcome == 'success'
+        env:
+          GH_TOKEN: "${{ steps.app-token.outputs.token || github.token }}"
+          ORG: "${{ inputs.org }}"
+          REPOSITORY: "${{ inputs.repository }}"
+          EXCLUDE_REPOS: "${{ inputs.exclude_repos }}"
+          EXCLUDE_FILE: 'triage-assets/config/excluded-repos.txt'
+        run: |
+          bash triage-assets/scripts/snapshot.sh artefacts/after.json
+
+      # The report diffs the snapshots: it shows observed label
+      # movement, never the agent's own claims about what it did.
+      - name: 'Build report 📊'
+        if: always() && steps.before.outcome == 'success'
+        env:
+          DRY_RUN: "${{ inputs.dry_run }}"
+        run: |
+          extra=()
+          if [ -f artefacts/after.json ]; then
+            extra+=(--after artefacts/after.json)
+          fi
+          if [ "$DRY_RUN" = "true" ]; then
+            extra+=(--dry-run)
+          fi
+          python3 triage-assets/scripts/triage_report.py \
+            --before artefacts/before.json \
+            --transcript artefacts/session-transcript.json \
+            --output-md artefacts/triage-report.md \
+            --output-json artefacts/triage-report.json \
+            "${extra[@]}"
+
+      - name: 'Attach run artefacts 📎'
+        if: always()
+        # yamllint disable-line rule:line-length
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: "issues-triage-${{ github.run_id }}"
+          path: 'artefacts/'
+          retention-days: 90
+          if-no-files-found: 'warn'
