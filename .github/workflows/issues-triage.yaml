@@ -70,9 +70,13 @@ on:
         type: string
         default: 'lfreleng-actions/github-issues-triage'
       assets_ref:
-        description: 'Ref of assets_repository to fetch'
+        description: >-
+          Ref of assets_repository to fetch. Empty (the default)
+          locks the assets to the same commit as the called
+          workflow file, so pinning the reusable pins its scripts
+          and prompt too.
         type: string
-        default: 'main'
+        default: ''
     secrets:
       anthropic_api_key:
         description: 'Anthropic API key for the agent session'
@@ -81,19 +85,30 @@ on:
         description: 'GitHub App private key (with github_app_client_id)'
         required: false
 
-permissions: {}
+# No workflow-level permissions block: a called workflow's own
+# permissions key can reduce the caller's GITHUB_TOKEN grant but
+# never widen it, and an empty block would zero the token for every
+# consumer. Omitting it lets the caller's grant flow through, which
+# the fallback-token path depends on (issues: read for dry-run,
+# issues: write for App-less live labelling).
 
 jobs:
   triage:
     name: 'Triage'
     runs-on: 'ubuntu-latest'
     timeout-minutes: 30
-    permissions:
-      # The fallback-token path reads and labels issues in the
-      # calling repository; the App-token path carries its own
-      # org-wide issues:write permission independent of these.
-      issues: write
-      contents: read
+    # Serialise runs here, not solely in callers: two overlapping
+    # sessions would classify the same snapshot and apply
+    # conflicting labels. Scoped per caller repository and target
+    # org; queued, never cancelled.
+    concurrency:
+      group: "issues-triage-${{ github.repository }}-${{ inputs.org }}"
+      cancel-in-progress: false
+    # No job-level permissions block: the job inherits the caller's
+    # grant, so callers scope the fallback github.token themselves
+    # (issues: read suffices for dry-run; live labelling without an
+    # App needs issues: write). The App-token path carries its own
+    # org-wide issues:write permission independent of this grant.
     steps:
       # Load an egress allow-list for block mode. In audit mode the
       # step does not run and harden-runner records outbound calls
@@ -130,16 +145,41 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: "${{ inputs.assets_repository }}"
-          ref: "${{ inputs.assets_ref }}"
+          # job_workflow_sha is the commit of this called workflow
+          # file: assets stay version-locked to the pinned reusable
+          # unless the caller overrides assets_ref explicitly.
+          ref: "${{ inputs.assets_ref || github.job_workflow_sha }}"
           path: 'triage-assets'
           persist-credentials: false
+
+      # Without an App, the fallback github.token mutates the calling
+      # repository alone. Scope live runs to it so the agent never
+      # burns turns attempting unauthorised edits elsewhere; dry-run
+      # keeps the requested scope, since it reads public data and
+      # writes nothing.
+      - name: 'Resolve scan scope 🎯'
+        id: scope
+        env:
+          REPOSITORY: "${{ inputs.repository }}"
+          APP_CLIENT_ID: "${{ inputs.github_app_client_id }}"
+          DRY_RUN: "${{ inputs.dry_run }}"
+          CALLER_REPO: "${{ github.event.repository.name }}"
+        run: |
+          effective="$REPOSITORY"
+          if [ -z "$effective" ] && [ -z "$APP_CLIENT_ID" ] &&
+            [ "$DRY_RUN" != "true" ]; then
+            effective="$CALLER_REPO"
+            echo "No GitHub App configured: live run scoped" \
+              "to $effective"
+          fi
+          echo "repository=$effective" >> "$GITHUB_OUTPUT"
 
       - name: 'Snapshot issues (before) 📸'
         id: before
         env:
           GH_TOKEN: "${{ steps.app-token.outputs.token || github.token }}"
           ORG: "${{ inputs.org }}"
-          REPOSITORY: "${{ inputs.repository }}"
+          REPOSITORY: "${{ steps.scope.outputs.repository }}"
           EXCLUDE_REPOS: "${{ inputs.exclude_repos }}"
           EXCLUDE_FILE: 'triage-assets/config/excluded-repos.txt'
         run: |
@@ -158,7 +198,7 @@ jobs:
           ORG: "${{ inputs.org }}"
           DRY_RUN: "${{ inputs.dry_run }}"
           RETRIAGE: "${{ inputs.retriage }}"
-          REPOSITORY: "${{ inputs.repository }}"
+          REPOSITORY: "${{ steps.scope.outputs.repository }}"
         run: |
           {
             cat triage-assets/prompt/triage.md
@@ -170,10 +210,12 @@ jobs:
               echo "- Restrict the scan to repository: $REPOSITORY"
             fi
             if [ "$DRY_RUN" = "true" ]; then
-              echo "- Mode: DRY RUN. Do not run gh issue edit." \
+              echo "- Mode: DRY RUN. Do not apply labels." \
                 "Report the labels you would apply instead."
             else
-              echo "- Mode: live. Apply labels with gh issue edit."
+              echo "- Mode: live. Apply labels with" \
+                "triage-assets/scripts/apply-label.sh as the" \
+                "procedure describes."
             fi
             if [ "$RETRIAGE" = "true" ]; then
               echo "- Retriage mode: re-examine labelled issues too."
@@ -189,17 +231,30 @@ jobs:
           tools="Bash(gh search issues:*),Bash(gh issue list:*)"
           tools="$tools,Bash(gh issue view:*),Bash(gh label list:*)"
           if [ "$DRY_RUN" != "true" ]; then
-            tools="$tools,Bash(gh issue edit:*)"
+            tools="$tools,Bash(bash"
+            tools="$tools triage-assets/scripts/apply-label.sh:*)"
           fi
           echo "tools=$tools" >> "$GITHUB_OUTPUT"
 
       - name: 'Run triage agent 🤖'
         id: agent
         if: steps.before.outputs.pending != '0' || inputs.retriage
+        # Step-level timeout, inside the job's 30-minute ceiling: a
+        # session that hits it fails this step alone, leaving the
+        # always() evidence steps (transcript, snapshot, report,
+        # upload) guaranteed time to run. A job-level timeout would
+        # cancel those too.
+        timeout-minutes: 20
         # yamllint disable-line rule:line-length
         uses: anthropics/claude-code-action@9d7150bc8a3dae8149739a88019d192b579ad90c # v1.0.193
         env:
           GH_TOKEN: "${{ steps.app-token.outputs.token || github.token }}"
+          # Enforced by apply-label.sh, independent of the prompt:
+          # targets must sit inside this org/repository scope, avoid
+          # the exclusion list, and resolve to real issues (not PRs).
+          TRIAGE_ORG: "${{ inputs.org }}"
+          TRIAGE_REPOSITORY: "${{ steps.scope.outputs.repository }}"
+          TRIAGE_EXCLUDE_FILE: 'artefacts/excluded-repos.txt'
         with:
           anthropic_api_key: "${{ secrets.anthropic_api_key }}"
           github_token: >-
@@ -230,7 +285,7 @@ jobs:
         env:
           GH_TOKEN: "${{ steps.app-token.outputs.token || github.token }}"
           ORG: "${{ inputs.org }}"
-          REPOSITORY: "${{ inputs.repository }}"
+          REPOSITORY: "${{ steps.scope.outputs.repository }}"
           EXCLUDE_REPOS: "${{ inputs.exclude_repos }}"
           EXCLUDE_FILE: 'triage-assets/config/excluded-repos.txt'
         run: |

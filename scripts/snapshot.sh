@@ -43,12 +43,13 @@ if [ -n "${REPOSITORY:-}" ]; then
   args+=(--repo "$ORG/$REPOSITORY")
 fi
 
-gh search issues "${args[@]}" > "$outfile.raw"
-jq --arg excl "$excludes" '
+# Stream straight into jq: no unfiltered intermediate file ever
+# touches the artefact directory, so a failure part-way cannot leak
+# excluded repositories into the uploaded bundle.
+gh search issues "${args[@]}" | jq --arg excl "$excludes" '
   ($excl | split("\n") | map(select(length > 0))) as $list
   | map(select(.repository.name as $n | ($list | index($n)) | not))
-' "$outfile.raw" > "$outfile"
-rm -f "$outfile.raw"
+' > "$outfile"
 
 count="$(jq 'length' "$outfile")"
 echo "Snapshot: $count open issue(s) -> $outfile"

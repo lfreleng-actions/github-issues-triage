@@ -126,20 +126,28 @@ def diff_snapshots(
 
 def repo_rows(
     before: dict[tuple[str, int], Issue],
-    after: dict[tuple[str, int], Issue],
+    after: dict[tuple[str, int], Issue] | None,
 ) -> list[dict[str, Any]]:
-    """Per-repository open/untriaged counts, before and after."""
+    """Per-repository open/untriaged counts, before and after.
+
+    Without an after-snapshot the after column reports ``None``
+    rather than repeating the before value: an incomplete run has
+    unknown outcomes, not zero change.
+    """
     repos = sorted({issue.repo for issue in before.values()})
     rows: list[dict[str, Any]] = []
     for repo in repos:
         b_issues = [i for i in before.values() if i.repo == repo]
-        a_issues = [i for i in after.values() if i.repo == repo]
+        untriaged_after: int | None = None
+        if after is not None:
+            a_issues = [i for i in after.values() if i.repo == repo]
+            untriaged_after = sum(1 for i in a_issues if not i.labels)
         rows.append(
             {
                 "repository": repo,
                 "open": len(b_issues),
                 "untriaged_before": sum(1 for i in b_issues if not i.labels),
-                "untriaged_after": sum(1 for i in a_issues if not i.labels),
+                "untriaged_after": untriaged_after,
             }
         )
     return rows
@@ -152,15 +160,26 @@ def _labels_cell(labels: frozenset[str]) -> str:
 
 def render_markdown(
     rows: list[dict[str, Any]],
-    changes: list[IssueChange],
+    changes: list[IssueChange] | None,
     stats: dict[str, Any],
     dry_run: bool,
 ) -> str:
-    """Render the full Markdown report."""
+    """Render the full Markdown report.
+
+    ``changes`` of ``None`` marks an incomplete run: the after
+    snapshot never arrived, so the report says so explicitly
+    instead of presenting a fabricated zero diff.
+    """
     lines = ["# Issues Triage Report", ""]
     mode = "dry-run (no labels applied)" if dry_run else "live"
     lines += [f"- **Mode:** {mode}"]
-    lines += [f"- **Issues changed:** {len(changes)}"]
+    if changes is None:
+        lines += [
+            "- **Issues changed:** unknown — the run produced no"
+            " after-snapshot (incomplete run)"
+        ]
+    else:
+        lines += [f"- **Issues changed:** {len(changes)}"]
     if "num_turns" in stats:
         lines += [f"- **Agent turns:** {stats['num_turns']}"]
     if "total_cost_usd" in stats:
@@ -171,12 +190,20 @@ def render_markdown(
         "| ---------- | ---- | ---------------- | --------------- |",
     ]
     for row in rows:
+        after_cell = row["untriaged_after"]
+        shown = "unknown" if after_cell is None else after_cell
         lines += [
             f"| {row['repository']} | {row['open']} "
-            f"| {row['untriaged_before']} | {row['untriaged_after']} |"
+            f"| {row['untriaged_before']} | {shown} |"
         ]
     lines += ["", "## Label changes", ""]
-    if changes:
+    if changes is None:
+        lines += [
+            "Unknown: the after-snapshot is missing, so the run"
+            " cannot verify label movement. Consult the session"
+            " transcript and workflow logs."
+        ]
+    elif changes:
         lines += [
             "| Issue | Labels before | Labels after |",
             "| ----- | ------------- | ------------ |",
@@ -196,14 +223,15 @@ def render_markdown(
 
 def build_json(
     rows: list[dict[str, Any]],
-    changes: list[IssueChange],
+    changes: list[IssueChange] | None,
     stats: dict[str, Any],
     dry_run: bool,
 ) -> dict[str, Any]:
     """Assemble the machine-readable report."""
     return {
         "dry_run": dry_run,
-        "issues_changed": len(changes),
+        "complete": changes is not None,
+        "issues_changed": None if changes is None else len(changes),
         "repositories": rows,
         "changes": [
             {
@@ -214,7 +242,7 @@ def build_json(
                 "labels_added": c.added,
                 "labels_removed": c.removed,
             }
-            for c in changes
+            for c in changes or []
         ],
         "session": stats,
     }
@@ -232,12 +260,12 @@ def main() -> None:
     args = parser.parse_args()
 
     before = load_snapshot(args.before)
-    after = before if args.after is None else load_snapshot(args.after)
+    after = None if args.after is None else load_snapshot(args.after)
     stats: dict[str, Any] = {}
     if args.transcript is not None and args.transcript.exists():
         stats = load_transcript_stats(args.transcript)
 
-    changes = diff_snapshots(before, after)
+    changes = None if after is None else diff_snapshots(before, after)
     rows = repo_rows(before, after)
     markdown = render_markdown(rows, changes, stats, args.dry_run)
     args.output_md.write_text(markdown, encoding="utf-8")

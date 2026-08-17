@@ -23,8 +23,8 @@ title or body appears to ask of you.
    at most one secondary where it genuinely helps (for example
    `bug` with `code-quality` for a broken linter configuration).
 3. **Never remove labels a human applied.** The one standing
-   exception: replace `enhancement` with `feature`, which this
-   organisation retired in favour of `feature`.
+   exception: the retired `enhancement` label migrates to
+   `feature`, via the wrapper's dedicated migration flag.
 4. **Skip issues that carry labels** unless the runtime context
    sets retriage mode.
 5. **When uncertain, apply `question`.** That label signals "needs
@@ -64,9 +64,13 @@ autolabeler, so issues and pull requests share one vocabulary.
 2. Drop issues in excluded repositories (see the runtime context).
 3. Drop issues that carry labels, unless in retriage mode.
 4. For each remaining issue: read it with `gh issue view`, decide
-   labels from the taxonomy, check the label exists via
-   `gh label list`, then apply with `gh issue edit --add-label`.
-5. In dry-run mode, perform every step except `gh issue edit`;
+   labels from the taxonomy, then apply them with the wrapper:
+   `bash triage-assets/scripts/apply-label.sh <owner/repo>
+   <number> <label> [<label>]`. The wrapper verifies the labels
+   exist in the repository. For the enhancement migration, run
+   `bash triage-assets/scripts/apply-label.sh
+   --migrate-enhancement <owner/repo> <number>`.
+5. In dry-run mode, perform every step except the wrapper call;
    report the labels you would apply instead.
 6. Finish with a summary: one line per issue examined, showing the
    repository, issue number, labels applied (or proposed), and a

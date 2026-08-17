@@ -356,8 +356,6 @@ the run, so we can debug the triage logic turn by turn:
   turn-by-turn: prompts, tool calls, tool results, token usage) and
   exposes its path as a step output. The workflow copies that file to
   `artefacts/session-transcript.json` verbatim.
-- The workflow tees Claude Code's human-readable stdout to
-  `artefacts/session-console.log` as the quick-scan companion.
 - The transcript also yields **cost telemetry** (turns used,
   input/output tokens, model id), which the report step folds into
   the step summary so spend per run is visible without opening the
@@ -376,7 +374,10 @@ decision then.
 A single `actions/upload-artifact` step (SHA-pinned) runs with
 `if: always()` so failed or timed-out sessions still surface whatever
 the run captured — the failure cases are precisely the ones needing
-the transcript:
+the transcript. The **agent step carries its own 20-minute timeout**
+inside the job's 30-minute ceiling: a session that hits it fails that
+step alone, leaving the evidence steps guaranteed time to run (a
+job-level timeout would cancel `always()` steps too):
 
 ```yaml
 - uses: actions/upload-artifact@<commit-sha>  # vX.Y.Z
@@ -395,7 +396,7 @@ Contents:
 | `before.json` | Org issue state before the session |
 | `after.json` | Org issue state after the session |
 | `session-transcript.json` | Full structured agent session (debugging) |
-| `session-console.log` | Human-readable session output |
+| `prompt.md` | The exact assembled prompt the session received |
 | `triage-report.json` | Machine-readable diff + per-issue actions |
 | `triage-report.md` | The same report as rendered in the summary |
 
@@ -461,7 +462,7 @@ Interface of the reusable workflow:
 | `egress_allow_config` | `''` | `harden-runner-block-action` config coordinate (block mode) |
 | `github_app_client_id` | `''` | App auth; falls back to `github.token` when empty |
 | `assets_repository` | this repo | Where to fetch the prompt and report script |
-| `assets_ref` | `main` | Ref of `assets_repository` to fetch |
+| `assets_ref` | called workflow's commit | Ref of `assets_repository` to fetch |
 
 | Secret | Required | Purpose |
 | ------ | -------- | ------- |
@@ -473,9 +474,12 @@ Interface of the reusable workflow:
 Defaults favour safe onboarding: a first-time consumer gets a
 dry-run in audit mode scoped by their own token. The fallback to
 `github.token` means a single-repository consumer needs no App at
-all — the default token can label issues in its own repository.
-Cross-repo triage needs the App (or a PAT passed as the private-key
-secret alternative, discouraged per §5.2).
+all — the default token can label issues in its own repository,
+and **live runs without an App scope themselves to the calling
+repository**, so the agent never burns turns attempting edits its
+token cannot perform. Cross-repo triage needs the App (or a PAT
+passed as the private-key secret alternative, discouraged per
+§5.2).
 
 ## 8. Repository Layout
 
@@ -541,12 +545,12 @@ README.md                                    # rewritten for this repo
 | ------- | ---------- |
 | Anthropic API outage / 529s | Job fails visibly; next weekday run catches up. No retry storm: one run per day. |
 | Agent mislabels an issue | Labels are reversible; step summary makes every action reviewable; humans can relabel (rule 3 stops the agent undoing them). |
-| Agent goes off-script | `--allowedTools` denies every verb except issue read/label; App token holds `issues: write` and nothing more; `--max-turns` and `timeout-minutes` bound the session. |
+| Agent goes off-script | `--allowedTools` denies every verb except issue reads plus a constrained label wrapper (validated repo/number/labels, org/repo scope and exclusion enforcement, pull requests rejected, `--add-label` and the coded enhancement migration, nothing else); `--max-turns` and step/job timeouts bound the session. |
 | Prompt-injection via issue body | Real risk: issue text arrives as untrusted input. Containment as above — worst case within the sandbox is a wrong label on some issue, not code execution or data exfiltration (egress is allow-listed). Prompt instructs the agent to treat issue bodies as data, never as instructions. |
 | Rate limits (GitHub) | ~120 open issues org-wide at worst; App tokens get 15k req/hr. Not a concern at this scale. |
 | Cost runaway | Pre-scan short-circuit (§4.3), max-turns, weekday schedule, dedicated Anthropic workspace with a spend cap. |
 | Secret leakage in logs | Actions masks registered secrets; Claude Code does not echo its key; harden-runner blocks unexpected egress. Transcript artefacts contain public issue text and nothing else (§7.2). |
-| Session dies mid-run, no evidence | Artefact upload runs `if: always()`; snapshots and partial transcript survive timeouts and failures. |
+| Session dies mid-run, no evidence | The agent step's own 20-minute timeout fails it inside the job ceiling; artefact upload runs `if: always()`, so snapshots and partial transcript survive. A missing after-snapshot renders the report "incomplete", never a fabricated zero diff. |
 | Agent self-reports inaccurately | The report step builds the summary from the before/after snapshot diff, not the agent's claims, and flags divergence. |
 
 <!-- markdownlint-enable MD013 -->

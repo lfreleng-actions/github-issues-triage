@@ -46,7 +46,11 @@ jobs:
     permissions:
       issues: write
       contents: read
-    uses: lfreleng-actions/github-issues-triage/.github/workflows/issues-triage.yaml@main
+    # Pin to an immutable release commit SHA; the tag rides along
+    # as a comment. Never reference a mutable branch here: the
+    # workflow receives your API key and an issues:write token.
+    # yamllint disable-line rule:line-length
+    uses: lfreleng-actions/github-issues-triage/.github/workflows/issues-triage.yaml@<commit-sha>  # vX.Y.Z
     with:
       org: 'your-org'
       dry_run: true
@@ -55,6 +59,9 @@ jobs:
       anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
       github_app_private_key: ${{ secrets.YOUR_APP_PRIVATE_KEY }}
 ```
+
+Pinning the workflow pins its scripts and prompt too: the assets
+checkout defaults to the called workflow's own commit.
 
 Without a GitHub App, the workflow falls back to the caller's
 `github.token` and labels issues in the calling repository alone —
@@ -79,7 +86,7 @@ needs an App installed across the target with `issues: write` and
 | `egress_allow_config` | `''` | `harden-runner-block-action` config coordinate |
 | `github_app_client_id` | `''` | App auth; empty falls back to `github.token` |
 | `assets_repository` | this repo | Source of the prompt and scripts |
-| `assets_ref` | `main` | Ref of `assets_repository` to fetch |
+| `assets_ref` | called workflow's commit | Ref of `assets_repository` to fetch |
 
 | Secret | Required | Purpose |
 | ------ | -------- | ------- |
@@ -104,9 +111,10 @@ needs an App installed across the target with `issues: write` and
 ## Safety model
 
 - **Dry-run by default**: consumers opt in to live labelling
-- **Tool containment**: the agent receives read/label `gh` verbs;
-  `gh issue edit` joins in live mode alone — no `git`, no
-  arbitrary shell
+- **Tool containment**: the agent receives read verbs of `gh` plus,
+  in live mode, a constrained wrapper that validates repository,
+  issue number, and label existence before a fixed `--add-label`
+  operation — no `gh issue edit`, no `git`, no arbitrary shell
 - **Token scope**: App tokens carry `issues: write` and
   `metadata: read`, down-scoped at mint time, expiring in an hour
 - **Prompt-injection defence**: the policy prompt instructs the
