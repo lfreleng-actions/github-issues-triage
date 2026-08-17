@@ -1,0 +1,10 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Linux Foundation
+#
+# Repositories the triage scan skips, one per line. '#' introduces
+# a comment. The list matches the exclusions configured for
+# github-security-report-action, so the triage pipeline and the
+# security report agree on scope.
+project-reporting-artifacts
+test-tags-calver
+test-tags-semantic
