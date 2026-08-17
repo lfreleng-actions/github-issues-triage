@@ -6,15 +6,19 @@
 paths:
   .github/workflows/issues-triage.yaml:
     ignore:
-      # actionlint does not yet know 'github.job_workflow_sha'.
+      # actionlint does not yet know 'github.job_workflow_sha' or
+      # 'job.workflow_sha'.
       #
-      # GitHub documents it in the github context: for workflow runs
-      # that use a reusable workflow, it is the commit SHA of the
-      # called (reusable) workflow file. The triage workflow uses it
-      # to version-lock its asset checkout (prompt and scripts) to
-      # the same commit consumers pinned the workflow to.
+      # GitHub documents job_workflow_sha in the github context: for
+      # workflow runs that use a reusable workflow, it is the commit
+      # SHA of the called (reusable) workflow file; newer runners
+      # expose the same value as job.workflow_sha. The triage
+      # workflow tries both to version-lock its asset checkout
+      # (prompt and scripts) to the same commit consumers pinned the
+      # workflow to.
       #
-      # actionlint validates context properties against a hardcoded
-      # list that predates this property. Remove this ignore once
-      # actionlint learns it.
+      # actionlint validates context properties against hardcoded
+      # lists that predate these properties. Remove these ignores
+      # once actionlint learns them.
       - 'property "job_workflow_sha" is not defined in object type'
+      - 'property "workflow_sha" is not defined in object type'

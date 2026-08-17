@@ -85,6 +85,7 @@ mint time.
 | `model` | `claude-opus-5` | Model passed to Claude Code |
 | `dry_run` | `true` | Report intended labels; apply nothing |
 | `retriage` | `false` | Re-examine issues that carry labels |
+| `skip_agent` | `false` | Plumbing test: skip the agent session |
 | `repository` | `''` | Restrict the scan to one repository |
 | `exclude_repos` | `''` | Comma-separated repositories to skip |
 | `max_turns` | `80` | Agent session turn ceiling |
@@ -96,7 +97,7 @@ mint time.
 
 | Secret | Required | Purpose |
 | ------ | -------- | ------- |
-| `anthropic_api_key` | yes | Anthropic API authentication |
+| `anthropic_api_key` | unless `skip_agent` | Anthropic API authentication |
 | `github_app_private_key` | no | Pairs with `github_app_client_id` |
 
 <!-- markdownlint-enable MD013 -->
@@ -109,7 +110,7 @@ mint time.
 | -------- | ------- | ------- |
 | `issues-triage.yaml` | The reusable pipeline | `workflow_call` |
 | `issues-triage-cron.yaml` | Org triage caller | 07:00 UTC weekdays / dispatch |
-| `testing.yaml` | Pipeline dry-run, no writes | Pull request / dispatch |
+| `testing.yaml` | Secretless plumbing test / manual dry-run | Pull request / dispatch |
 | `release.yaml` | Promote draft release on tag push | Tag push |
 
 <!-- markdownlint-enable MD013 -->

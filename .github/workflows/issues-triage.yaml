@@ -41,6 +41,10 @@ on:
         description: 'Re-examine issues that carry labels'
         type: boolean
         default: false
+      skip_agent:
+        description: 'Plumbing test: skip the agent session entirely'
+        type: boolean
+        default: false
       repository:
         description: 'Restrict the scan to one repository'
         type: string
@@ -79,8 +83,11 @@ on:
         default: ''
     secrets:
       anthropic_api_key:
-        description: 'Anthropic API key for the agent session'
-        required: true
+        description: >-
+          Anthropic API key for the agent session. Optional when
+          skip_agent is true; a guard fails fast when the session
+          needs it and none arrived.
+        required: false
       github_app_private_key:
         description: 'GitHub App private key (with github_app_client_id)'
         required: false
@@ -147,6 +154,21 @@ jobs:
             "github_app_private_key secret)."
           exit 1
 
+      # Agent sessions need the Anthropic key; fail fast when the
+      # caller supplied none. skip_agent runs are secretless by
+      # design, so they bypass this check.
+      - name: 'Require Anthropic key for agent runs 🚦'
+        if: ${{ !inputs.skip_agent }}
+        env:
+          ANTHROPIC_KEY: "${{ secrets.anthropic_api_key }}"
+        run: |
+          if [ -z "$ANTHROPIC_KEY" ]; then
+            echo "::error::Agent runs need the anthropic_api_key" \
+              "secret; pass it, or set skip_agent for a secretless" \
+              "plumbing test."
+            exit 1
+          fi
+
       - name: 'Mint GitHub App token 🔑'
         id: app-token
         if: inputs.github_app_client_id != ''
@@ -163,15 +185,35 @@ jobs:
           permission-issues: 'write'
           permission-metadata: 'read'
 
+      # Resolve the assets ref before checkout, guarding the
+      # immutable-pin promise: consumers pinning this workflow to a
+      # commit get the assets from that same commit. The job
+      # workflow SHA context moved between runner generations, so
+      # try both spellings and refuse to fall back to a mutable
+      # default branch when neither resolves.
+      - name: 'Resolve assets ref 🏷️'
+        id: assets
+        env:
+          ASSETS_REF: "${{ inputs.assets_ref }}"
+          # yamllint disable-line rule:line-length
+          JOB_WORKFLOW_SHA: "${{ job.workflow_sha || github.job_workflow_sha }}"
+        run: |
+          ref="${ASSETS_REF:-$JOB_WORKFLOW_SHA}"
+          if [ -z "$ref" ]; then
+            echo "::error::Cannot determine the called workflow's" \
+              "commit on this runner; set assets_ref explicitly to" \
+              "keep the assets version-locked."
+            exit 1
+          fi
+          echo "ref=$ref" >> "$GITHUB_OUTPUT"
+          echo "Assets ref: $ref"
+
       - name: 'Checkout triage assets 🛎️'
         # yamllint disable-line rule:line-length
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: "${{ inputs.assets_repository }}"
-          # job_workflow_sha is the commit of this called workflow
-          # file: assets stay version-locked to the pinned reusable
-          # unless the caller overrides assets_ref explicitly.
-          ref: "${{ inputs.assets_ref || github.job_workflow_sha }}"
+          ref: "${{ steps.assets.outputs.ref }}"
           path: 'triage-assets'
           persist-credentials: false
 
@@ -197,7 +239,11 @@ jobs:
       # Retriage mode always runs it: labelled issues are in scope.
       - name: 'Assemble prompt 📝'
         id: prompt
-        if: steps.before.outputs.pending != '0' || inputs.retriage
+        # yamllint disable rule:line-length
+        if: >-
+          ${{ !inputs.skip_agent &&
+          (steps.before.outputs.pending != '0' || inputs.retriage) }}
+        # yamllint enable rule:line-length
         env:
           ORG: "${{ inputs.org }}"
           DRY_RUN: "${{ inputs.dry_run }}"
@@ -242,7 +288,11 @@ jobs:
 
       - name: 'Run triage agent 🤖'
         id: agent
-        if: steps.before.outputs.pending != '0' || inputs.retriage
+        # yamllint disable rule:line-length
+        if: >-
+          ${{ !inputs.skip_agent &&
+          (steps.before.outputs.pending != '0' || inputs.retriage) }}
+        # yamllint enable rule:line-length
         # Step-level timeout, inside the job's 30-minute ceiling: a
         # session that hits it fails this step alone, leaving the
         # always() evidence steps (transcript, snapshot, report,

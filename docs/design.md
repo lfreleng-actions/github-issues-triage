@@ -455,6 +455,7 @@ Interface of the reusable workflow:
 | `model` | `claude-opus-5` | Model passed to Claude Code |
 | `dry_run` | `true` | Report intended labels; apply nothing |
 | `retriage` | `false` | Re-examine issues that carry labels |
+| `skip_agent` | `false` | Plumbing test: skip the agent session (secretless) |
 | `repository` | `''` | Restrict the scan to one repository |
 | `exclude_repos` | `''` | Comma-separated repositories to skip |
 | `max_turns` | `80` | Agent session turn ceiling |
@@ -466,7 +467,7 @@ Interface of the reusable workflow:
 
 | Secret | Required | Purpose |
 | ------ | -------- | ------- |
-| `anthropic_api_key` | yes | Anthropic API authentication |
+| `anthropic_api_key` | unless `skip_agent` | Anthropic API authentication |
 | `github_app_private_key` | no | Pairs with `github_app_client_id` |
 
 <!-- markdownlint-enable MD013 -->
@@ -507,10 +508,12 @@ workflow, not a reusable one, so much of the skeleton does not apply.
 - `.github/workflows/merge.yaml`
 - `.github/workflows/testing.yaml` — the template version
   exercised the removed `build-test.yaml` skeleton; **replaced** by
-  a triage-specific test: every pull request runs the reusable
-  workflow in dry-run + retriage mode, with edit verbs withheld,
-  using the PR head's assets — proving the full plumbing without
-  touching any issue (fork PRs skip it: no secrets)
+  a triage-specific test. Pull request runs are **secretless**: a
+  same-repository PR can alter the local reusable workflow, so PR
+  checks skip the agent session (`skip_agent`) and prove the
+  plumbing from the PR head with no secret in reach. The full
+  agent dry-run runs from `workflow_dispatch`, a maintainer-
+  triggered, trusted execution path.
 - `examples/` (build-test-release / merge examples)
 
 ### Import from `actions-template`

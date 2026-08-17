@@ -2,20 +2,19 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: 2026 The Linux Foundation
 
-# Exercises the reusable issues-triage workflow on pull requests,
-# in read-only form: dry_run removes gh issue edit from the agent's
-# tool set and instructs it to report the labels it would apply
-# instead of applying them. Retriage mode makes the run meaningful
-# even when the backlog is clean (a labelled backlog would
-# otherwise short-circuit before the agent session), so every PR
-# proves the full plumbing: snapshots, prompt assembly, the agent
-# session, transcript capture, diff report, and artefact upload.
+# Exercises the reusable issues-triage workflow.
 #
-# The reusable workflow and its assets (prompt, scripts) come from
-# the PR head, so the run validates the changes under review.
+# Pull request runs are SECRETLESS by design: a same-repository PR
+# can modify the local reusable workflow and asset scripts, so a PR
+# check that held the Anthropic API key would hand it to the code
+# under review. PR runs therefore set skip_agent, proving the
+# plumbing (snapshots, exclusion filtering, report generation,
+# artefact upload) from the PR head without any secret in reach.
 #
-# Fork PRs skip the job: repository secrets (the Anthropic API key)
-# are unavailable to them by GitHub's security model.
+# The full agent session -- dry-run, read-only -- runs from
+# workflow_dispatch instead: a maintainer triggers it explicitly
+# against a chosen ref, which is the trusted, approval-gated
+# execution path for validating agent behaviour before merge.
 name: 'Testing 🧪'
 
 # yamllint disable-line rule:truthy
@@ -30,18 +29,30 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  triage-dry-run:
-    name: 'Triage dry-run'
-    # yamllint disable rule:line-length
-    if: >
-      github.event_name == 'workflow_dispatch' ||
-      (github.event_name == 'pull_request' && !github.event.pull_request.head.repo.fork)
-    # yamllint enable rule:line-length
+  plumbing:
+    name: 'Plumbing (secretless)'
+    if: github.event_name == 'pull_request'
     permissions:
-      # The reusable holds no write path without App credentials,
-      # and this caller supplies none, so even a defective or
-      # malicious PR-head script holds no write token.
-      issues: read  # Snapshot reads for the dry-run
+      # The job passes no secrets and skips the agent session, so
+      # even a malicious PR-head script holds nothing but reads.
+      issues: read  # Snapshot reads
+      contents: read  # Asset checkout and metadata reads
+    uses: ./.github/workflows/issues-triage.yaml
+    with:
+      org: 'lfreleng-actions'
+      dry_run: true
+      # Skip the agent: PR runs are secretless (see header comment).
+      skip_agent: true
+      egress_policy: 'audit'
+      assets_repository: >-
+        ${{ github.event.pull_request.head.repo.full_name }}
+      assets_ref: "${{ github.event.pull_request.head.sha }}"
+
+  triage-dry-run:
+    name: 'Triage dry-run (manual)'
+    if: github.event_name == 'workflow_dispatch'
+    permissions:
+      issues: read  # Snapshot and dry-run reads
       contents: read  # Asset checkout and metadata reads
     uses: ./.github/workflows/issues-triage.yaml
     with:
@@ -51,13 +62,10 @@ jobs:
       # Re-examine labelled issues so the agent session always runs
       # and the report always carries proposals to inspect.
       retriage: true
-      # Bound the session cost on PR runs.
+      # Bound the session cost on test runs.
       max_turns: '40'
       egress_policy: 'audit'
-      assets_repository: >-
-        ${{ github.event.pull_request.head.repo.full_name
-        || github.repository }}
-      assets_ref: >-
-        ${{ github.event.pull_request.head.sha || github.sha }}
+      assets_repository: "${{ github.repository }}"
+      assets_ref: "${{ github.sha }}"
     secrets:
       anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}

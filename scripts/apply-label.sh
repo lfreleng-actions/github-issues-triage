@@ -58,16 +58,23 @@ printf '%s' "$number" | grep -Eq '^[0-9]+$' \
   || die "issue number fails validation: $number"
 
 [ -n "${TRIAGE_ORG:-}" ] || die "TRIAGE_ORG is not set"
+# GitHub resolves repository identifiers case-insensitively, so
+# every scope comparison normalises to lowercase; otherwise
+# alternate casing would bypass the containment.
+lower() {
+  printf '%s' "$1" | tr '[:upper:]' '[:lower:]'
+}
 owner="${repo%%/*}"
 name="${repo#*/}"
-[ "$owner" = "$TRIAGE_ORG" ] \
+[ "$(lower "$owner")" = "$(lower "$TRIAGE_ORG")" ] \
   || die "repository outside triage scope ($TRIAGE_ORG): $repo"
-if [ -n "${TRIAGE_REPOSITORY:-}" ] && [ "$name" != "$TRIAGE_REPOSITORY" ]
+if [ -n "${TRIAGE_REPOSITORY:-}" ] &&
+  [ "$(lower "$name")" != "$(lower "$TRIAGE_REPOSITORY")" ]
 then
   die "run restricted to $TRIAGE_ORG/$TRIAGE_REPOSITORY: $repo"
 fi
 if [ -n "${TRIAGE_EXCLUDE_FILE:-}" ] && [ -f "$TRIAGE_EXCLUDE_FILE" ]; then
-  grep -Fxq -- "$name" "$TRIAGE_EXCLUDE_FILE" \
+  grep -Fxqi -- "$name" "$TRIAGE_EXCLUDE_FILE" \
     && die "repository is excluded from triage: $repo"
 fi
 
