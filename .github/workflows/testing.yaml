@@ -38,11 +38,11 @@ jobs:
       (github.event_name == 'pull_request' && !github.event.pull_request.head.repo.fork)
     # yamllint enable rule:line-length
     permissions:
-      # Read suffices: dry_run withholds every write tool, and the
-      # reusable workflow inherits this grant, so even a defective
-      # or malicious PR-head script holds no write token.
-      issues: read
-      contents: read
+      # The reusable holds no write path without App credentials,
+      # and this caller supplies none, so even a defective or
+      # malicious PR-head script holds no write token.
+      issues: read  # Snapshot reads for the dry-run
+      contents: read  # Asset checkout and metadata reads
     uses: ./.github/workflows/issues-triage.yaml
     with:
       org: 'lfreleng-actions'

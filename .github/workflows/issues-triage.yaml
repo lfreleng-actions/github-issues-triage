@@ -12,10 +12,10 @@
 # also lands in the step summary.
 #
 # Consumers outside this organisation supply their own tokens: an
-# Anthropic API key, and either a GitHub App (client id input plus
-# private-key secret) for cross-repository triage, or nothing, in
-# which case the workflow falls back to the caller's github.token
-# and labels issues in the calling repository alone.
+# Anthropic API key, plus a GitHub App (client id input and
+# private-key secret) for any run that applies labels. Without App
+# credentials the pipeline runs read-only: dry-run reports work
+# with the caller's github.token, and live runs refuse to start.
 #
 # Defaults favour safe onboarding: dry_run (report, change nothing)
 # and egress_policy audit. See docs/design.md for the full design.
@@ -62,7 +62,7 @@ on:
         type: string
         default: ''
       github_app_client_id:
-        description: 'GitHub App client id; empty uses github.token'
+        description: 'GitHub App client id; empty limits runs to dry-run'
         type: string
         default: ''
       assets_repository:
@@ -85,18 +85,25 @@ on:
         description: 'GitHub App private key (with github_app_client_id)'
         required: false
 
-# No workflow-level permissions block: a called workflow's own
-# permissions key can reduce the caller's GITHUB_TOKEN grant but
-# never widen it, and an empty block would zero the token for every
-# consumer. Omitting it lets the caller's grant flow through, which
-# the fallback-token path depends on (issues: read for dry-run,
-# issues: write for App-less live labelling).
+# Empty workflow-level default: any job added later starts with no
+# GITHUB_TOKEN permissions. The triage job below declares its own
+# explicit read-only grant, which overrides this workflow-level
+# default for that job (job-level permissions take precedence), so
+# the caller's grant still reaches it. Live labelling never uses
+# GITHUB_TOKEN at all: the App token carries the writes.
+permissions: {}
 
 jobs:
   triage:
     name: 'Triage'
     runs-on: 'ubuntu-latest'
     timeout-minutes: 30
+    permissions:
+      # Live labelling always uses the GitHub App token (see the
+      # guard step), which carries its own permissions, never this
+      # fallback GITHUB_TOKEN grant.
+      issues: read  # Snapshots and dry-run reads
+      contents: read  # Asset checkout and metadata reads
     # Serialise runs here, not solely in callers: two overlapping
     # sessions would classify the same snapshot and apply
     # conflicting labels. Scoped per caller repository and target
@@ -128,6 +135,18 @@ jobs:
           allowed-endpoints: >
             ${{ env.CONNECTION_ALLOW_LIST }}
 
+      # Live labelling requires App credentials: the job holds an
+      # issues:read fallback token by design, so an App-less live
+      # run could never apply a label. Fail fast rather than spend
+      # an agent session discovering that.
+      - name: 'Require App for live runs 🚦'
+        if: ${{ !inputs.dry_run && inputs.github_app_client_id == '' }}
+        run: |
+          echo "::error::Live runs (dry_run: false) require GitHub" \
+            "App credentials (github_app_client_id plus the" \
+            "github_app_private_key secret)."
+          exit 1
+
       - name: 'Mint GitHub App token 🔑'
         id: app-token
         if: inputs.github_app_client_id != ''
@@ -137,6 +156,10 @@ jobs:
           client-id: "${{ inputs.github_app_client_id }}"
           private-key: "${{ secrets.github_app_private_key }}"
           owner: "${{ inputs.org }}"
+          # Scope the token to one repository when the run itself is
+          # scoped; an empty value grants the owner installation,
+          # which org-wide triage requires.
+          repositories: "${{ inputs.repository }}"
           permission-issues: 'write'
           permission-metadata: 'read'
 
@@ -152,34 +175,15 @@ jobs:
           path: 'triage-assets'
           persist-credentials: false
 
-      # Without an App, the fallback github.token mutates the calling
-      # repository alone. Scope live runs to it so the agent never
-      # burns turns attempting unauthorised edits elsewhere; dry-run
-      # keeps the requested scope, since it reads public data and
-      # writes nothing.
-      - name: 'Resolve scan scope 🎯'
-        id: scope
-        env:
-          REPOSITORY: "${{ inputs.repository }}"
-          APP_CLIENT_ID: "${{ inputs.github_app_client_id }}"
-          DRY_RUN: "${{ inputs.dry_run }}"
-          CALLER_REPO: "${{ github.event.repository.name }}"
-        run: |
-          effective="$REPOSITORY"
-          if [ -z "$effective" ] && [ -z "$APP_CLIENT_ID" ] &&
-            [ "$DRY_RUN" != "true" ]; then
-            effective="$CALLER_REPO"
-            echo "No GitHub App configured: live run scoped" \
-              "to $effective"
-          fi
-          echo "repository=$effective" >> "$GITHUB_OUTPUT"
-
+      # Without an App the job's token is issues:read, which the
+      # guard above pairs with dry-run mode; the requested scope
+      # passes through unchanged.
       - name: 'Snapshot issues (before) 📸'
         id: before
         env:
           GH_TOKEN: "${{ steps.app-token.outputs.token || github.token }}"
           ORG: "${{ inputs.org }}"
-          REPOSITORY: "${{ steps.scope.outputs.repository }}"
+          REPOSITORY: "${{ inputs.repository }}"
           EXCLUDE_REPOS: "${{ inputs.exclude_repos }}"
           EXCLUDE_FILE: 'triage-assets/config/excluded-repos.txt'
         run: |
@@ -198,7 +202,7 @@ jobs:
           ORG: "${{ inputs.org }}"
           DRY_RUN: "${{ inputs.dry_run }}"
           RETRIAGE: "${{ inputs.retriage }}"
-          REPOSITORY: "${{ steps.scope.outputs.repository }}"
+          REPOSITORY: "${{ inputs.repository }}"
         run: |
           {
             cat triage-assets/prompt/triage.md
@@ -253,7 +257,7 @@ jobs:
           # targets must sit inside this org/repository scope, avoid
           # the exclusion list, and resolve to real issues (not PRs).
           TRIAGE_ORG: "${{ inputs.org }}"
-          TRIAGE_REPOSITORY: "${{ steps.scope.outputs.repository }}"
+          TRIAGE_REPOSITORY: "${{ inputs.repository }}"
           TRIAGE_EXCLUDE_FILE: 'artefacts/excluded-repos.txt'
         with:
           anthropic_api_key: "${{ secrets.anthropic_api_key }}"
@@ -285,7 +289,7 @@ jobs:
         env:
           GH_TOKEN: "${{ steps.app-token.outputs.token || github.token }}"
           ORG: "${{ inputs.org }}"
-          REPOSITORY: "${{ steps.scope.outputs.repository }}"
+          REPOSITORY: "${{ inputs.repository }}"
           EXCLUDE_REPOS: "${{ inputs.exclude_repos }}"
           EXCLUDE_FILE: 'triage-assets/config/excluded-repos.txt'
         run: |

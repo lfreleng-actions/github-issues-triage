@@ -40,11 +40,14 @@ snapshot (before) -> agent session -> snapshot (after)
 Other organisations and users can call the pipeline directly,
 supplying their own tokens:
 
+<!-- markdownlint-disable MD013 -->
+
 ```yaml
 jobs:
   triage:
     permissions:
-      issues: write
+      # Snapshot reads; label writes use the App token instead
+      issues: read
       contents: read
     # Pin to an immutable release commit SHA; the tag rides along
     # as a comment. Never reference a mutable branch here: the
@@ -60,14 +63,17 @@ jobs:
       github_app_private_key: ${{ secrets.YOUR_APP_PRIVATE_KEY }}
 ```
 
+<!-- markdownlint-enable MD013 -->
+
 Pinning the workflow pins its scripts and prompt too: the assets
 checkout defaults to the called workflow's own commit.
 
-Without a GitHub App, the workflow falls back to the caller's
-`github.token` and labels issues in the calling repository alone —
-enough for single-repository consumers. Cross-repository triage
-needs an App installed across the target with `issues: write` and
-`metadata: read`.
+Without a GitHub App the pipeline cannot write: dry-run reports
+work with the caller's `github.token` (`issues: read`), and live
+runs refuse to start. Applying labels needs an App installed
+across the target with `issues: write` and `metadata: read`;
+single-repository runs scope the App token to that repository at
+mint time.
 
 ### Inputs
 
@@ -84,7 +90,7 @@ needs an App installed across the target with `issues: write` and
 | `max_turns` | `80` | Agent session turn ceiling |
 | `egress_policy` | `audit` | harden-runner mode (`audit`/`block`) |
 | `egress_allow_config` | `''` | `harden-runner-block-action` config coordinate |
-| `github_app_client_id` | `''` | App auth; empty falls back to `github.token` |
+| `github_app_client_id` | `''` | App auth; empty limits runs to dry-run |
 | `assets_repository` | this repo | Source of the prompt and scripts |
 | `assets_ref` | called workflow's commit | Ref of `assets_repository` to fetch |
 

@@ -3,6 +3,18 @@
 # SPDX-FileCopyrightText: 2025 The Linux Foundation
 
 # Path-specific configurations.
-# (No ignore rules currently required; add path-scoped ignores here as
-# needed when instantiating this template.)
-paths: {}
+paths:
+  .github/workflows/issues-triage.yaml:
+    ignore:
+      # actionlint does not yet know 'github.job_workflow_sha'.
+      #
+      # GitHub documents it in the github context: for workflow runs
+      # that use a reusable workflow, it is the commit SHA of the
+      # called (reusable) workflow file. The triage workflow uses it
+      # to version-lock its asset checkout (prompt and scripts) to
+      # the same commit consumers pinned the workflow to.
+      #
+      # actionlint validates context properties against a hardcoded
+      # list that predates this property. Remove this ignore once
+      # actionlint learns it.
+      - 'property "job_workflow_sha" is not defined in object type'

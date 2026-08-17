@@ -460,7 +460,7 @@ Interface of the reusable workflow:
 | `max_turns` | `80` | Agent session turn ceiling |
 | `egress_policy` | `audit` | harden-runner mode (`audit`/`block`) |
 | `egress_allow_config` | `''` | `harden-runner-block-action` config coordinate (block mode) |
-| `github_app_client_id` | `''` | App auth; falls back to `github.token` when empty |
+| `github_app_client_id` | `''` | App auth; empty limits runs to dry-run |
 | `assets_repository` | this repo | Where to fetch the prompt and report script |
 | `assets_ref` | called workflow's commit | Ref of `assets_repository` to fetch |
 
@@ -472,14 +472,14 @@ Interface of the reusable workflow:
 <!-- markdownlint-enable MD013 -->
 
 Defaults favour safe onboarding: a first-time consumer gets a
-dry-run in audit mode scoped by their own token. The fallback to
-`github.token` means a single-repository consumer needs no App at
-all — the default token can label issues in its own repository,
-and **live runs without an App scope themselves to the calling
-repository**, so the agent never burns turns attempting edits its
-token cannot perform. Cross-repo triage needs the App (or a PAT
-passed as the private-key secret alternative, discouraged per
-§5.2).
+dry-run in audit mode scoped by their own token. Without App
+credentials the pipeline cannot write: the job's own token
+carries `issues: read` for snapshots, and **live runs fail fast**
+rather than spend an agent session discovering they cannot label.
+Applying labels — in one repository or across an organisation —
+needs the App (or a PAT passed as the private-key secret
+alternative, discouraged per §5.2); single-repository runs scope
+the App token to that repository at mint time.
 
 ## 8. Repository Layout
 

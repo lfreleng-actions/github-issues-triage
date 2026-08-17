@@ -47,8 +47,9 @@ jobs:
   triage:
     name: 'Triage'
     permissions:
-      issues: write
-      contents: read
+      # Live labelling uses the App token, never this grant
+      issues: read  # Snapshot reads when running without the App
+      contents: read  # Asset checkout and repository metadata reads
     uses: ./.github/workflows/issues-triage.yaml
     with:
       org: 'lfreleng-actions'
