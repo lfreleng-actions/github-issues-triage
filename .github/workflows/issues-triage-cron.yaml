@@ -1,0 +1,71 @@
+---
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Linux Foundation
+
+# Scheduled thin caller for the reusable issues-triage workflow in
+# this repository: 07:00 UTC every weekday, scanning the whole
+# lfreleng-actions organisation.
+#
+# Scheduled runs stay in dry-run until the rollout completes (see
+# docs/design.md section 11); a manual dispatch can go live by
+# unticking dry_run. Egress runs in audit mode until the agent
+# session's endpoints land in the org allow-list, then flips to
+# block with the tagged allow-list loaded by
+# harden-runner-block-action.
+name: 'Issues Triage ⏰'
+
+# yamllint disable-line rule:truthy
+on:
+  schedule:
+    # 07:00 UTC, Monday to Friday
+    - cron: '0 7 * * 1-5'
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: 'Report intended labels; apply nothing'
+        type: boolean
+        default: true
+      retriage:
+        description: 'Re-examine issues that carry labels'
+        type: boolean
+        default: false
+      repository:
+        description: 'Restrict the scan to one repository'
+        type: string
+        default: ''
+
+permissions: {}
+
+# Never let two triage sessions race; queue instead. Runs are
+# cheap to queue and expensive to interleave: two concurrent agent
+# sessions would label against stale snapshots.
+concurrency:
+  group: 'issues-triage'
+  cancel-in-progress: false
+
+jobs:
+  triage:
+    name: 'Triage'
+    permissions:
+      # Live labelling uses the App token, never this grant
+      issues: read  # Snapshot reads when running without the App
+      contents: read  # Asset checkout and repository metadata reads
+    uses: ./.github/workflows/issues-triage.yaml
+    with:
+      org: 'lfreleng-actions'
+      # Scheduled runs are always dry-run during rollout; manual
+      # dispatch runs take the operator's choice.
+      dry_run: ${{ github.event_name == 'schedule' || inputs.dry_run }}
+      retriage: ${{ inputs.retriage || false }}
+      repository: ${{ inputs.repository || '' }}
+      egress_policy: 'audit'
+      # The App variables live at org level; when unset the
+      # reusable falls back to github.token (single-repo scope),
+      # which suits dry-run rollout.
+      github_app_client_id: ${{ vars.LF_RELENG_BOT_CLIENT_ID || '' }}
+      # Run the pipeline with the assets from the triggering commit.
+      assets_repository: ${{ github.repository }}
+      assets_ref: ${{ github.sha }}
+    secrets:
+      anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+      github_app_private_key: ${{ secrets.LF_RELENG_BOT_PRIVATE_KEY }}

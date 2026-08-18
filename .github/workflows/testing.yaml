@@ -1,54 +1,71 @@
 ---
 # SPDX-License-Identifier: Apache-2.0
-# SPDX-FileCopyrightText: 2025 The Linux Foundation
+# SPDX-FileCopyrightText: 2026 The Linux Foundation
 
-# Exercises the reusable workflow SKELETONS in this repository against
-# downstream fixture repositories, in parallel, to prove the generic
-# scaffolding (job graph, harden-runner wiring, dual checkout, artifact
-# plumbing, SBOM/Grype chain) functions end-to-end. The placeholder
-# build/test/audit/SBOM steps are language-agnostic, so the matrix runs
-# against fixtures of different languages by design.
+# Exercises the reusable issues-triage workflow.
 #
-# The reusable workflows are referenced by LOCAL path so this always
-# validates the current branch's workflows.
+# Pull request runs are SECRETLESS by design: a same-repository PR
+# can modify the local reusable workflow and asset scripts, so a PR
+# check that held the Anthropic API key would hand it to the code
+# under review. PR runs therefore set skip_agent, proving the
+# plumbing (snapshots, exclusion filtering, report generation,
+# artefact upload) from the PR head without any secret in reach.
 #
-# The build-test-release and merge skeletons are NOT self-tested here:
-# build-test-release requires a signed semver tag-push context (and
-# creates/promotes GitHub releases), and merge requires a merged-commit
-# context (and would exercise publish legs); neither is available or
-# safe on a pull request. Instantiating repos validate those through
-# their own release/merge cycles.
+# The full agent session -- dry-run, read-only -- runs from
+# workflow_dispatch instead: a maintainer triggers it explicitly
+# against a chosen ref, which is the trusted, approval-gated
+# execution path for validating agent behaviour before merge.
 name: 'Testing 🧪'
 
 # yamllint disable-line rule:truthy
 on:
-  workflow_dispatch:
   pull_request:
-    types: [opened, reopened, synchronize]
-    branches:
-      - main
-      - master
-
-concurrency:
-  group: "${{ github.workflow }}-${{ github.ref }}"
-  cancel-in-progress: true
+  workflow_dispatch:
 
 permissions: {}
 
+concurrency:
+  group: "testing-${{ github.ref }}"
+  cancel-in-progress: true
+
 jobs:
-  # Fixture repositories of different languages, fanned out in parallel
-  # via a matrix; the template placeholders run identically for both.
-  build-test:
-    name: 'Build/Test'
-    strategy:
-      fail-fast: false
-      matrix:
-        repository:
-          - 'lfreleng-actions/test-go-project'
-          - 'lfreleng-actions/test-node-project'
+  plumbing:
+    name: 'Plumbing (secretless)'
+    if: github.event_name == 'pull_request'
     permissions:
-      contents: read
-      pull-requests: read  # repository-metadata-action queries PR data
-    uses: ./.github/workflows/build-test.yaml
+      # The job passes no secrets and skips the agent session, so
+      # even a malicious PR-head script holds nothing but reads.
+      issues: read  # Snapshot reads
+      contents: read  # Asset checkout and metadata reads
+    uses: ./.github/workflows/issues-triage.yaml
     with:
-      repository: ${{ matrix.repository }}
+      org: 'lfreleng-actions'
+      dry_run: true
+      # Skip the agent: PR runs are secretless (see header comment).
+      skip_agent: true
+      egress_policy: 'audit'
+      assets_repository: >-
+        ${{ github.event.pull_request.head.repo.full_name }}
+      assets_ref: "${{ github.event.pull_request.head.sha }}"
+
+  triage-dry-run:
+    name: 'Triage dry-run (manual)'
+    if: github.event_name == 'workflow_dispatch'
+    permissions:
+      issues: read  # Snapshot and dry-run reads
+      contents: read  # Asset checkout and metadata reads
+    uses: ./.github/workflows/issues-triage.yaml
+    with:
+      org: 'lfreleng-actions'
+      # Read-only: report proposed labels, apply nothing.
+      dry_run: true
+      # Re-examine labelled issues so the agent session always runs
+      # and the report always carries proposals to inspect.
+      retriage: true
+      # Bound the session cost on test runs.
+      max_turns: '40'
+      egress_policy: 'audit'
+      assets_repository: "${{ github.repository }}"
+      assets_ref: "${{ github.sha }}"
+    secrets:
+      anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
