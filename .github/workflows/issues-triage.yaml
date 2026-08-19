@@ -5,17 +5,19 @@
 # Reusable AI issues-triage workflow.
 #
 # Scans the open issues of an organisation (or a single repository),
-# runs a Claude Code agent session that applies category labels per
-# the bundled prompt/triage.md policy, and attaches full run
-# evidence to the workflow run: before/after issue snapshots, the
-# complete agent session transcript, and a diff-based report that
-# also lands in the step summary.
+# runs an agent session — Claude Code or the Gemini CLI, selected by
+# the engine input — that applies category labels per the bundled
+# prompt/triage.md policy, and attaches full run evidence to the
+# workflow run: before/after issue snapshots, the agent session
+# transcript, and a diff-based report that also lands in the step
+# summary.
 #
-# Consumers outside this organisation supply their own tokens: an
-# Anthropic API key, plus a GitHub App (client id input and
-# private-key secret) for any run that applies labels. Without App
-# credentials the pipeline runs read-only: dry-run reports work
-# with the caller's github.token, and live runs refuse to start.
+# Consumers outside this organisation supply their own tokens: a
+# model API key matching the engine, plus a GitHub App (client id
+# input and private-key secret) for any run that applies labels.
+# Without App credentials the pipeline runs read-only: dry-run
+# reports work with the caller's github.token, and live runs refuse
+# to start.
 #
 # Defaults favour safe onboarding: dry_run (report, change nothing)
 # and egress_policy audit. See docs/design.md for the full design.
@@ -29,10 +31,17 @@ on:
         description: 'GitHub organisation or user to triage'
         required: true
         type: string
-      model:
-        description: 'Model passed to Claude Code'
+      engine:
+        description: 'Agent engine: claude or gemini'
         type: string
-        default: 'claude-opus-5'
+        default: 'claude'
+      model:
+        description: >-
+          Model for the agent session. Empty (the default) resolves
+          the engine default: claude-opus-5 for claude,
+          gemini-3.5-flash-lite for gemini.
+        type: string
+        default: ''
       dry_run:
         description: 'Report intended labels; apply nothing'
         type: boolean
@@ -84,9 +93,14 @@ on:
     secrets:
       anthropic_api_key:
         description: >-
-          Anthropic API key for the agent session. Optional when
-          skip_agent is true; a guard fails fast when the session
+          Anthropic API key; needed when engine is claude unless
+          skip_agent is true. A guard fails fast when the session
           needs it and none arrived.
+        required: false
+      gemini_api_key:
+        description: >-
+          Gemini API key (AI Studio); needed when engine is gemini
+          unless skip_agent is true. The same guard applies.
         required: false
       github_app_private_key:
         description: 'GitHub App private key (with github_app_client_id)'
@@ -149,20 +163,45 @@ jobs:
             "github_app_private_key secret)."
           exit 1
 
-      # Agent sessions need the Anthropic key; fail fast when the
-      # caller supplied none. skip_agent runs are secretless by
-      # design, so they bypass this check.
-      - name: 'Require Anthropic key for agent runs 🚦'
-        if: ${{ !inputs.skip_agent }}
+      # Validate the engine, resolve the model default, and check
+      # that the matching API key arrived; fail fast before any
+      # spend. skip_agent runs are secretless by design, so they
+      # bypass the key check (never the engine validation).
+      - name: 'Resolve engine and model 🚦'
+        id: model
         env:
+          ENGINE: "${{ inputs.engine }}"
+          MODEL: "${{ inputs.model }}"
+          SKIP_AGENT: "${{ inputs.skip_agent }}"
           ANTHROPIC_KEY: "${{ secrets.anthropic_api_key }}"
+          GEMINI_KEY: "${{ secrets.gemini_api_key }}"
         run: |
-          if [ -z "$ANTHROPIC_KEY" ]; then
-            echo "::error::Agent runs need the anthropic_api_key" \
-              "secret; pass it, or set skip_agent for a secretless" \
-              "plumbing test."
+          case "$ENGINE" in
+            claude)
+              default_model='claude-opus-5'
+              key="$ANTHROPIC_KEY"
+              key_name='anthropic_api_key'
+              ;;
+            gemini)
+              default_model='gemini-3.5-flash-lite'
+              key="$GEMINI_KEY"
+              key_name='gemini_api_key'
+              ;;
+            *)
+              echo "::error::Unknown engine '$ENGINE'; use claude" \
+                "or gemini."
+              exit 1
+              ;;
+          esac
+          if [ "$SKIP_AGENT" != "true" ] && [ -z "$key" ]; then
+            echo "::error::Agent runs with engine '$ENGINE' need" \
+              "the $key_name secret; pass it, or set skip_agent" \
+              "for a secretless plumbing test."
             exit 1
           fi
+          model="${MODEL:-$default_model}"
+          echo "model=$model" >> "$GITHUB_OUTPUT"
+          echo "Engine: $ENGINE | model: $model"
 
       - name: 'Mint GitHub App token 🔑'
         id: app-token
@@ -244,6 +283,7 @@ jobs:
           DRY_RUN: "${{ inputs.dry_run }}"
           RETRIAGE: "${{ inputs.retriage }}"
           REPOSITORY: "${{ inputs.repository }}"
+          MAX_TURNS: "${{ inputs.max_turns }}"
         run: |
           {
             cat triage-assets/prompt/triage.md
@@ -280,12 +320,40 @@ jobs:
             tools="$tools triage-assets/scripts/apply-label.sh:*)"
           fi
           echo "tools=$tools" >> "$GITHUB_OUTPUT"
+          # Gemini CLI settings: the coreTools allow-list is the
+          # Gemini analogue of Claude's --allowedTools grant; the
+          # same read verbs, the same wrapper in live mode.
+          live='false'
+          if [ "$DRY_RUN" != "true" ]; then
+            live='true'
+          fi
+          settings=$(jq -nc --argjson live "$live" \
+            --argjson turns "$MAX_TURNS" '
+            {
+              coreTools: ([
+                "run_shell_command(gh search issues)",
+                "run_shell_command(gh issue list)",
+                "run_shell_command(gh issue view)",
+                "run_shell_command(gh label list)"
+              ] + (if $live then [
+                "run_shell_command(bash triage-assets/scripts/apply-label.sh)"
+              ] else [] end)),
+              maxSessionTurns: $turns,
+              telemetry: {
+                enabled: true,
+                target: "local",
+                otlpEndpoint: "",
+                logPrompts: true,
+                outfile: "artefacts/gemini-telemetry.json"
+              }
+            }')
+          echo "gemini_settings=$settings" >> "$GITHUB_OUTPUT"
 
-      - name: 'Run triage agent 🤖'
+      - name: 'Run triage agent (Claude) 🤖'
         id: agent
         # yamllint disable rule:line-length
         if: >-
-          ${{ !inputs.skip_agent &&
+          ${{ inputs.engine == 'claude' && !inputs.skip_agent &&
           (steps.before.outputs.pending != '0' || inputs.retriage) }}
         # yamllint enable rule:line-length
         # Step-level timeout, inside the job's 30-minute ceiling: a
@@ -310,23 +378,60 @@ jobs:
             ${{ steps.app-token.outputs.token || github.token }}
           prompt: "${{ steps.prompt.outputs.prompt }}"
           claude_args: >-
-            --model ${{ inputs.model }}
+            --model ${{ steps.model.outputs.model }}
             --max-turns ${{ inputs.max_turns }}
             --allowedTools "${{ steps.prompt.outputs.tools }}"
 
+      # The Gemini engine: same prompt, same wrapper containment
+      # (via env), tool grants translated to the Gemini CLI's
+      # coreTools allow-list in the settings JSON.
+      - name: 'Run triage agent (Gemini) 🤖'
+        id: agent-gemini
+        # yamllint disable rule:line-length
+        if: >-
+          ${{ inputs.engine == 'gemini' && !inputs.skip_agent &&
+          (steps.before.outputs.pending != '0' || inputs.retriage) }}
+        # yamllint enable rule:line-length
+        timeout-minutes: 20
+        # yamllint disable-line rule:line-length
+        uses: google-github-actions/run-gemini-cli@f77273f4c914e4bf38440cf36a0369cb64a37489 # v0.1.22
+        env:
+          GH_TOKEN: "${{ steps.app-token.outputs.token || github.token }}"
+          TRIAGE_ORG: "${{ inputs.org }}"
+          TRIAGE_REPOSITORY: "${{ inputs.repository }}"
+          TRIAGE_EXCLUDE_FILE: 'artefacts/excluded-repos.txt'
+        with:
+          gemini_api_key: "${{ secrets.gemini_api_key }}"
+          gemini_model: "${{ steps.model.outputs.model }}"
+          prompt: "${{ steps.prompt.outputs.prompt }}"
+          settings: "${{ steps.prompt.outputs.gemini_settings }}"
+          # The pipeline uploads its own evidence bundle; the
+          # action's uploader would duplicate it.
+          upload_artifacts: false
+
       # Preserve the full session transcript for debugging, whatever
       # the session outcome. The failure cases are precisely the runs
-      # that need it.
+      # that need it. Claude exposes a structured execution log;
+      # Gemini's telemetry writes into artefacts/ directly (see the
+      # settings JSON) and its summary output lands beside it.
       - name: 'Preserve session transcript 📜'
         if: always() && steps.before.outcome == 'success'
         env:
           EXECUTION_FILE: "${{ steps.agent.outputs.execution_file }}"
+          GEMINI_SUMMARY: "${{ steps.agent-gemini.outputs.summary }}"
         run: |
           if [ -n "$EXECUTION_FILE" ] && [ -f "$EXECUTION_FILE" ]; then
             cp "$EXECUTION_FILE" artefacts/session-transcript.json
             echo "Transcript preserved from: $EXECUTION_FILE"
+          elif [ -f artefacts/gemini-telemetry.json ]; then
+            echo "Gemini telemetry captured in artefacts/"
           else
-            echo "No execution file to preserve"
+            echo "No session transcript to preserve"
+          fi
+          if [ -n "$GEMINI_SUMMARY" ]; then
+            printf '%s\n' "$GEMINI_SUMMARY" \
+              > artefacts/session-summary.md
+            echo "Gemini session summary preserved"
           fi
 
       - name: 'Snapshot issues (after) 📸'
