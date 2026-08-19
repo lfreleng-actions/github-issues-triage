@@ -452,7 +452,8 @@ Interface of the reusable workflow:
 | Input | Default | Purpose |
 | ----- | ------- | ------- |
 | `org` | (required) | GitHub organisation or user to triage |
-| `model` | `claude-opus-5` | Model passed to Claude Code |
+| `engine` | `claude` | Agent engine: `claude` or `gemini` |
+| `model` | engine default | Model; empty resolves per engine (§12) |
 | `dry_run` | `true` | Report intended labels; apply nothing |
 | `retriage` | `false` | Re-examine issues that carry labels |
 | `skip_agent` | `false` | Plumbing test: skip the agent session (secretless) |
@@ -467,7 +468,8 @@ Interface of the reusable workflow:
 
 | Secret | Required | Purpose |
 | ------ | -------- | ------- |
-| `anthropic_api_key` | unless `skip_agent` | Anthropic API authentication |
+| `anthropic_api_key` | claude runs, unless `skip_agent` | Anthropic API authentication |
+| `gemini_api_key` | gemini runs, unless `skip_agent` | Gemini API (AI Studio) authentication |
 | `github_app_private_key` | no | Pairs with `github_app_client_id` |
 
 <!-- markdownlint-enable MD013 -->
@@ -601,7 +603,7 @@ README.md                                    # rewritten for this repo
 
 ## 12. Second Engine: Google Gemini
 
-**Status:** In development on the `feat/gemini-engine` branch.
+**Status:** Implemented; resolved decisions recorded below.
 
 IT direction steers most agentic work towards Google
 Gemini, so the pipeline gains a second agent engine. The
@@ -650,49 +652,43 @@ design.
 
 ### 12.3 Authentication
 
-Two supported routes, mirroring the org's Anthropic decision
-(§3.2):
+Resolved: **`GEMINI_API_KEY`** (AI Studio), a repository secret
+mirroring the Anthropic arrangement (§3.2). Vertex AI via
+Workload Identity Federation (keyless OIDC) remains available as
+a later increment — the harness supports it — without breaking
+the interface.
 
-1. **`GEMINI_API_KEY`** (AI Studio) — a secret, the simple route;
-   recommended for parity with the Claude engine
-2. **Vertex AI via Workload Identity Federation** — keyless OIDC
-   (`gcp_workload_identity_provider` + service account); the
-   stronger posture when the org's Google Cloud footprint is
-   ready for it
-
-The reusable workflow exposes a `gemini_api_key` secret first;
-Vertex/WIF inputs can follow as a later increment without
-breaking the interface.
+The default Gemini model is **`gemini-3.5-flash-lite`** (IT
+choice); the `model` input overrides it per run.
 
 ### 12.4 Work items
 
-1. `engine` input + mutually exclusive agent steps in
-   `issues-triage.yaml`; per-engine key guard (the Anthropic
-   guard generalises)
-2. Gemini `settings` JSON assembly (tool allow-list, turn
-   ceiling) alongside the existing tools-string assembly
-3. Transcript preservation for Gemini sessions: confirm the
-   log/telemetry contract and map it into
-   `artefacts/session-transcript.json`
-4. Egress: audit-mode run to harvest Gemini endpoints
-   (`generativelanguage.googleapis.com:443` expected for the API
-   route) for the org allow-list, as §7.1 did for Anthropic
-5. Report generator: cost/turn telemetry field mapping for Gemini
-   transcripts (`load_transcript_stats` parses defensively, so
-   unmapped fields drop out rather than break the report)
-6. Callers: `engine` choice on `workflow_dispatch`; the schedule
-   stays on the org-preferred engine once validated
-7. Docs: README consumption examples for both engines
+Delivered: the `engine` input with mutually exclusive agent
+steps, the engine-aware key guard and model resolution, Gemini
+`settings` assembly (coreTools allow-list, `maxSessionTurns`,
+telemetry into the artefact directory), session-summary capture,
+and the `engine` choice on the manual dry-run dispatch. The
+schedule stays on the Claude engine until the org validates
+Gemini output quality.
+
+Remaining:
+
+1. Transcript fidelity: confirm the Gemini telemetry log carries
+   turn-by-turn content matching the §7.2 evidence guarantee, and
+   map its cost/turn fields in `load_transcript_stats`
+   (defensive parsing means unmapped fields drop out rather than
+   break the report)
+2. Egress: audit-mode Gemini run to harvest endpoints
+   (`generativelanguage.googleapis.com:443` expected) for the org
+   allow-list, as §7.1 did for Anthropic
+3. README consumption example for the Gemini engine
 
 ### 12.5 Open questions (Gemini track)
 
-1. **Model identifier** — confirm the production Gemini model
-   string with IT (e.g. current `gemini-*-pro` generation) and
-   whether the org mandates Vertex AI over AI Studio keys.
-2. **Transcript fidelity** — does the Gemini CLI emit a
+1. **Transcript fidelity** — does the Gemini CLI emit a
    turn-by-turn structured log matching what Claude Code's
    `execution_file` provides? The §7.2 evidence guarantee must
    hold for both engines.
-3. **Billing ownership** — which GCP project/billing account
+2. **Billing ownership** — which GCP project/billing account
    carries the spend, and what is the Gemini analogue of the
    per-workspace spend cap?
