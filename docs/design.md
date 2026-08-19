@@ -53,22 +53,29 @@ else: labels are low-risk, reversible, and auditable.
 
 ## 3. Model Access: Copilot vs. Anthropic API
 
-Two candidate routes to Claude models exist; one is viable.
+Two candidate routes to Claude models existed at design time; one
+was viable then. GitHub has since shipped the route the other
+assessment ruled out — see §13.
 
-### 3.1 GitHub Copilot subscription — not usable ❌
+### 3.1 GitHub Copilot subscription — superseded ⚠️
 
-The org-level Copilot subscription exposes Anthropic models **within
-Copilot surfaces** (IDE chat, Copilot CLI, the Copilot coding
-agent) and nowhere else. There is no general-purpose API
-entitlement: Copilot terms do
-not permit driving arbitrary automation with the underlying models,
-and no supported harness exists for "run Claude Code against the
-Copilot backend". GitHub Models (the `models` permission on
+The original assessment recorded here: the org-level Copilot
+subscription exposes Anthropic models **within Copilot surfaces**
+(IDE chat, Copilot CLI, the Copilot coding agent) and nowhere
+else. There is no general-purpose API entitlement, and no
+supported harness exists for "run Claude Code against the Copilot
+backend". GitHub Models (the `models` permission on
 `GITHUB_TOKEN`) offers API access to a catalogue of models, but
-Anthropic models are not part of that catalogue and its rate limits
-target experimentation, not production batch jobs.
+Anthropic models are not part of that catalogue and its rate
+limits target experimentation, not production batch jobs.
 
-**Conclusion:** do not build on the Copilot entitlement.
+Most of that still holds: no general-purpose API entitlement
+exists, and GitHub Models remains the wrong tool. The conclusion
+drawn from it does not. Copilot CLI now carries a supported
+**programmatic mode** and documented GitHub Actions integration,
+which makes the Copilot surface itself a usable harness rather
+than a dead end. Section 13 records the third engine that follows
+from it.
 
 ### 3.2 Anthropic API key — recommended ✅
 
@@ -103,7 +110,7 @@ its consumer rate limits. Not appropriate for org infrastructure.
 | ------ | ------- |
 | `anthropics/claude-code-action` (official) | ✅ **Selected** |
 | Bespoke script calling the Messages API | ❌ Re-implements tool-use loop, retries, context mgmt |
-| Copilot coding agent | ❌ Repo-scoped, PR-oriented, wrong entitlement (§3.1) |
+| Copilot coding agent | ❌ Repo-scoped, PR-oriented, wrong shape; the CLI is the usable Copilot surface (§13) |
 | Self-hosted agent framework | ❌ Heavyweight; nothing to gain over Claude Code here |
 
 <!-- markdownlint-enable MD013 -->
@@ -693,3 +700,168 @@ Remaining:
 2. **Billing ownership** — which GCP project/billing account
    carries the spend, and what is the Gemini analogue of the
    per-workspace spend cap?
+
+## 13. Third Engine: GitHub Copilot
+
+**Status:** Implemented; resolved decisions recorded below.
+
+The organisation already pays for Copilot. A Copilot engine turns
+triage spend into an existing entitlement rather than a third
+vendor relationship, and removes a long-lived model API key from
+the pipeline. Section 3.1 records why the original design ruled
+Copilot out, and what changed since.
+
+The engine slots into the existing abstraction (§12.1): a third
+mutually exclusive agent-session step behind the same `engine`
+input, sharing the snapshots, exclusion filtering, policy prompt,
+label wrapper, diff report, and artefact bundle.
+
+### 13.1 Harness options
+
+<!-- markdownlint-disable MD013 -->
+
+| Option | Verdict |
+| ------ | ------- |
+| Copilot CLI programmatic mode (`copilot -p`) | ✅ **Selected** |
+| [`github/gh-aw`](https://github.com/github/gh-aw) (GitHub Agentic Workflows) | ❌ Replaces this pipeline rather than plugging into it |
+| A first-party Copilot CLI action | ❌ None exists |
+| Copilot coding agent | ❌ Repo-scoped, PR-oriented, wrong shape |
+
+<!-- markdownlint-enable MD013 -->
+
+GitHub's own documentation recommends Agentic Workflows for most
+automation, so the rejection needs justifying. `gh-aw` is a
+compiler: it takes agentic workflows written as Markdown and
+emits `.lock.yml` workflow files, carrying its own safe-output,
+sandboxing, and permission models. Adopting it here would mean
+re-authoring the pipeline in its idiom and displacing the parts
+that stay engine-neutral and already carry review — the evidence
+pipeline (§7.2), the label wrapper, the engine abstraction. That
+makes it the right choice for a greenfield agentic workflow, not
+for a third engine behind an established interface. Worth
+revisiting if this pipeline is ever rebuilt from scratch.
+
+No first-party action exists. Public workflows referencing
+`github/copilot-cli-action` point at a repository that does not
+exist. So the engine installs the CLI from npm at a pinned
+version and invokes it directly, which is the pattern GitHub's
+Actions documentation shows for direct use.
+
+### 13.2 Mapping across the three engines
+
+<!-- markdownlint-disable MD013 -->
+
+| Concern | Claude engine | Gemini engine | Copilot engine |
+| ------- | ------------- | ------------- | -------------- |
+| Harness | `anthropics/claude-code-action` | `google-github-actions/run-gemini-cli` | `copilot -p`, pinned npm install |
+| Prompt | `prompt` input | `prompt` input | `--prompt`, read from `artefacts/prompt.md` |
+| Model | `--model` via `claude_args` | `gemini_model` input | `--model` |
+| Tool containment | `--allowedTools` grant list | `settings` JSON: `tools.core` | `--allow-tool` plus `--deny-tool` |
+| Turn ceiling | `--max-turns` | `model.maxSessionTurns` | none — the step timeout bounds it |
+| Session evidence | `execution_file` output | telemetry log plus summary output | `--log-dir` plus `--share` transcript |
+
+<!-- markdownlint-enable MD013 -->
+
+Containment notes specific to this engine:
+
+- **Prefix matching.** Copilot CLI prefix-matches the shell
+  command in an `--allow-tool` pattern, so
+  `shell(gh issue list)` covers `gh issue list --owner … --json …`,
+  matching `Bash(gh issue list:*)` on the Claude side.
+- **Deny rules.** They outrank every allow rule and any approval
+  the CLI would otherwise infer, so the engine restates the
+  boundary explicitly: no `write`, no `git`, no `gh issue edit`.
+  Every label still travels through the wrapper.
+- **Built-in MCP servers, disabled.** Copilot CLI ships a GitHub
+  MCP server enabled by default, whose `label_write` tool would
+  apply labels without passing through `apply-label.sh` — around
+  the wrapper's scope, exclusion, and pull-request checks.
+  `--disable-builtin-mcps` closes that route. Neither of the other
+  two engines ships such a server, so this hardening has no
+  analogue there.
+- **Custom instructions, disabled.** The CLI merges `AGENTS.md`,
+  `CLAUDE.md`, `GEMINI.md`, and `.github/copilot-instructions.md`
+  from the working tree into its system prompt. The working tree
+  holds the assets checkout, which on test runs comes from a pull
+  request head. `--no-custom-instructions` leaves the policy
+  prompt as the single instruction source.
+- **No turn ceiling.** `max_turns` has no Copilot analogue;
+  `--max-ai-credits` caps credits per response, a different unit,
+  and makes no substitute. The agent step's 20-minute timeout
+  bounds the session, inside the job's 30-minute ceiling.
+
+### 13.3 Authentication and billing
+
+Copilot CLI reads its credential from `COPILOT_GITHUB_TOKEN`,
+then `GH_TOKEN`, then `GITHUB_TOKEN`. The engine sets the first
+(model access) and the second (the App token, repository access)
+so the two never mix: an App installation token cannot
+authenticate Copilot requests, and the Copilot credential must
+never carry `issues: write`.
+
+Two credentials work for the `copilot_token` secret:
+
+1. **The calling job's `GITHUB_TOKEN`**, where that job grants
+   `copilot-requests: write`. GitHub's recommended path: no
+   stored secret, a short-lived token per run, and usage metered
+   to the organisation. It depends on the organisation policy
+   "Allow use of Copilot CLI billed to the organization".
+2. **A fine-grained PAT** carrying the "Copilot Requests"
+   permission. Works regardless of that policy, at the cost of a
+   long-lived credential attributing spend to one person's seat.
+
+The reusable workflow takes a **secret** rather than declaring
+the permission itself, because a reusable-workflow chain can hold
+or reduce permissions, never raise them. Declaring
+`copilot-requests: write` on the triage job would fail every
+existing caller, including callers that never touch this engine.
+Passing the caller's token in as a secret leaves the permission
+decision — and its failure mode — with the consumer that wants
+the engine.
+
+This repository's own callers use the PAT for now: neither the
+pinned actionlint (1.7.12.24) nor the SchemaStore workflow schema
+(check-jsonschema 0.38.0) recognises the `copilot-requests`
+scope, so declaring it locally would fail the linting gate.
+Revisit once both learn it.
+
+The default model is **`claude-sonnet-4.6`**, the CLI's own
+default, pinned explicitly so an upstream change is not a silent
+change here. The `model` input overrides it per run.
+
+### 13.4 Work items
+
+Delivered: the `copilot` engine value, its credential guard and
+model default, the `--allow-tool`/`--deny-tool` translation of
+the shared tool grants, the pinned CLI install, session evidence
+into the artefact bundle, and the `copilot` choice on the manual
+dry-run dispatch. The schedule stays on the Claude engine.
+
+Remaining:
+
+1. Egress: an audit-mode Copilot run to harvest endpoints
+   (`api.githubcopilot.com:443` and `registry.npmjs.org:443`
+   expected, plus the Node distribution host used by
+   `setup-node`) for the org allow-list, as §7.1 did for
+   Anthropic
+2. Cost telemetry: `load_transcript_stats` parses a Claude-shaped
+   execution log; map the Copilot CLI's log fields so the report
+   carries turns and spend for this engine too (defensive parsing
+   means unmapped fields drop out rather than break the report)
+3. Confirm the organisation billing policy, then move this
+   repository's callers from the PAT to the caller `GITHUB_TOKEN`
+   once the linting toolchain recognises `copilot-requests`
+
+### 13.5 Open questions (Copilot track)
+
+1. **Prefix matching against multi-word `gh` subcommands** —
+   verify in a real run. A mismatch fails closed (the CLI denies
+   the tool and the session reports the failure) rather than
+   widening the boundary, but it wastes a session.
+2. **Model choice** — `claude-sonnet-4.6` against
+   `claude-haiku-4.5` for what is a classification workload;
+   measure quality against cost on a real backlog.
+3. **Premium-request accounting** — whether per-request billing
+   makes retriage runs materially more expensive here than on the
+   metered API engines, and where the analogue of a per-workspace
+   spend cap lives (cost centres, per §13.3).
