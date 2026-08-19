@@ -376,24 +376,35 @@ jobs:
               }
             }')
           echo "gemini_settings=$settings" >> "$GITHUB_OUTPUT"
-          # Copilot CLI grants: --allow-tool takes a comma-separated
-          # list of Kind(argument) patterns and prefix-matches the
-          # shell command, so shell(gh issue list) covers the same
-          # invocations Claude's Bash(gh issue list:*) does.
-          allow="shell(gh search issues),shell(gh issue list)"
-          allow="$allow,shell(gh issue view),shell(gh label list)"
+          # Copilot CLI grants. Two readings of its shell matching
+          # exist and the documentation supports both: the CLI
+          # reference describes ':*' as "the command stem followed
+          # by a space", while GitHub's own gh-aw compiler
+          # documents the bare form as a prefix match. Emit both
+          # forms of every pattern. Whichever reading holds, one
+          # matches; neither widens the grant, because both anchor
+          # on the same command.
+          patterns() {
+            for cmd in "$@"; do
+              printf 'shell(%s),shell(%s:*),' "$cmd" "$cmd"
+            done
+          }
+          allow_cmds=('gh search issues' 'gh issue list'
+            'gh issue view' 'gh label list')
           if [ "$DRY_RUN" != "true" ]; then
-            allow="$allow,shell(bash"
-            allow="$allow triage-assets/scripts/apply-label.sh)"
+            allow_cmds+=(
+              'bash triage-assets/scripts/apply-label.sh')
           fi
-          echo "copilot_allow=$allow" >> "$GITHUB_OUTPUT"
+          allow="$(patterns "${allow_cmds[@]}")"
+          echo "copilot_allow=${allow%,}" >> "$GITHUB_OUTPUT"
           # Deny rules outrank every allow rule and any approval the
           # CLI would otherwise infer, so they restate the
           # containment the allow-list already implies: the wrapper
           # applies labels, never the agent through gh issue edit.
-          deny="write,shell(git),shell(gh pr),shell(gh issue edit)"
-          deny="$deny,shell(gh issue close),shell(gh issue comment)"
-          echo "copilot_deny=$deny" >> "$GITHUB_OUTPUT"
+          deny_cmds=('git' 'gh pr' 'gh issue edit' 'gh issue close'
+            'gh issue comment')
+          deny="write,$(patterns "${deny_cmds[@]}")"
+          echo "copilot_deny=${deny%,}" >> "$GITHUB_OUTPUT"
 
       - name: 'Run triage agent (Claude) 🤖'
         id: agent
@@ -527,6 +538,14 @@ jobs:
           MODEL: "${{ steps.model.outputs.model }}"
           ALLOW_TOOLS: "${{ steps.prompt.outputs.copilot_allow }}"
           DENY_TOOLS: "${{ steps.prompt.outputs.copilot_deny }}"
+          # Shell tools and nothing else. --available-tools is the
+          # CLI's hard limit ('the model won't be able to use it at
+          # all'), unlike --allow-tool, which pre-approves commands
+          # but leaves read-only shell auto-approved. This drops
+          # file writes, patching, web_fetch, skills, and subagents
+          # out of reach entirely.
+          AVAILABLE_TOOLS: >-
+            bash,list_bash,read_bash,stop_bash,write_bash
         run: |
           mkdir -p artefacts/copilot-logs
           prompt="$(cat artefacts/prompt.md)"
@@ -537,11 +556,17 @@ jobs:
           #   the assets checkout from steering the session
           # --no-ask-user keeps the session autonomous; without it a
           #   question would stall until the timeout
+          # --secret-env-vars covers GH_TOKEN: the CLI redacts
+          #   GITHUB_TOKEN and COPILOT_GITHUB_TOKEN by default but
+          #   not the App token, which this step writes into logs
+          #   and a transcript that ship in a 90-day artefact
           copilot \
             --prompt="$prompt" \
             --model="$MODEL" \
+            --available-tools="$AVAILABLE_TOOLS" \
             --allow-tool="$ALLOW_TOOLS" \
             --deny-tool="$DENY_TOOLS" \
+            --secret-env-vars="GH_TOKEN,COPILOT_GITHUB_TOKEN" \
             --no-ask-user \
             --no-custom-instructions \
             --disable-builtin-mcps \

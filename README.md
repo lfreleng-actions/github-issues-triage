@@ -75,6 +75,11 @@ checkout defaults to the called workflow's own commit.
 
 ### Using the Copilot engine
 
+> [!WARNING]
+> The Copilot engine holds a weaker containment boundary than the
+> other two — see the safety model below and design doc §13.2. Use
+> it for evaluation, not for live or scheduled triage.
+
 The `copilot` engine needs no model API key. Grant the calling
 job `copilot-requests: write` and hand its `GITHUB_TOKEN` to the
 pipeline; usage meters to the organisation, gated on the "Allow
@@ -105,14 +110,24 @@ jobs:
 
 Where that policy is unavailable, pass a fine-grained PAT holding
 the "Copilot Requests" permission as `copilot_token` instead and
-drop the `copilot-requests` grant. Either way the token authorises
-model requests and nothing more; labels still travel over the App
-token.
+drop the `copilot-requests` grant.
+
+Either way the credential carries **no repository write access**:
+labels travel over the App token alone. Note the two routes differ
+in what else they carry. A PAT scoped to Copilot Requests reaches
+nothing but the model. The caller `GITHUB_TOKEN` also carries
+whatever else that job grants — `issues: read` and
+`contents: read` in the example above — so the guarantee there is
+the absence of write, not the absence of repository access.
 
 The reusable workflow does not declare `copilot-requests` itself:
 a called workflow can narrow the caller's permissions but never
 widen them, so declaring it there would fail every caller that
-runs a different engine. Design doc §13.3 covers the reasoning.
+runs a different engine. Passing the token in as a secret leaves
+that decision with you. Design doc §13.3 covers the reasoning, and
+§13.5 records that no run has yet confirmed the grant survives the
+hand-off — if it does not, the CLI rejects the token and the step
+fails with the evidence bundle intact.
 
 Without a GitHub App the pipeline cannot write: dry-run reports
 work with the caller's `github.token` (`issues: read`), and live
@@ -170,13 +185,21 @@ mint time.
 - **Tool containment**: the agent receives read verbs of `gh` plus,
   in live mode, a constrained wrapper that validates repository,
   issue number, and label existence before a fixed `--add-label`
-  operation — no `gh issue edit`, no `git`, no arbitrary shell.
-  The Copilot engine also runs with built-in MCP servers and
-  custom-instruction loading turned off, closing the GitHub MCP
-  server's route around that wrapper
+  operation — no `gh issue edit`, no `git`, no arbitrary shell
+- **Copilot engine caveat**: that engine restricts the model to
+  shell tools, denies the mutating `gh` and `git` verbs, and turns
+  off built-in MCP servers and custom-instruction loading. Its
+  allow-list is an approval policy rather than a filter, though,
+  and the CLI keeps auto-approving shell commands it treats as
+  reads. Those commands see both credentials in their environment,
+  and redaction works by value, so a command that encodes a token
+  defeats it. Writes stay shut, but treat this engine as opt-in
+  and unsuited to live or scheduled runs until the enforcement in
+  design doc §13.4 lands
 - **Token scope**: App tokens carry `issues: write` and
-  `metadata: read`, down-scoped at mint time, expiring in an hour;
-  model credentials stay separate and carry no repository access
+  `metadata: read`, down-scoped at mint time, expiring in an hour.
+  Model credentials stay separate and never carry repository
+  write, leaving the App token as the sole route to a label
 - **Prompt-injection defence**: the policy prompt instructs the
   agent to treat issue text as data; containment limits the worst
   case to a wrong label
