@@ -14,8 +14,11 @@ Scheduled AI triage of GitHub issues. A reusable workflow scans an
 organisation's open issues, runs an agent session — **Claude Code
 or the Gemini CLI**, selected per run — that applies category
 labels per a versioned policy prompt, and attaches full run
-evidence to the workflow run: before/after snapshots, the agent
-session transcript, and a diff-based report.
+evidence to the workflow run: before/after snapshots,
+engine-specific session evidence (Claude: a turn-by-turn
+transcript; Gemini: telemetry plus the session summary, with
+transcript fidelity under verification — design doc §12), and a
+diff-based report.
 
 The [design document](docs/design.md) covers the architecture,
 containment model, and rollout plan in full.

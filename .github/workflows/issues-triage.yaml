@@ -8,9 +8,10 @@
 # runs an agent session — Claude Code or the Gemini CLI, selected by
 # the engine input — that applies category labels per the bundled
 # prompt/triage.md policy, and attaches full run evidence to the
-# workflow run: before/after issue snapshots, the agent session
-# transcript, and a diff-based report that also lands in the step
-# summary.
+# workflow run: before/after issue snapshots, engine-specific
+# session evidence (Claude: a turn-by-turn transcript; Gemini:
+# telemetry plus the session summary), and a diff-based report that
+# also lands in the step summary.
 #
 # Consumers outside this organisation supply their own tokens: a
 # model API key matching the engine, plus a GitHub App (client id
@@ -320,9 +321,11 @@ jobs:
             tools="$tools triage-assets/scripts/apply-label.sh:*)"
           fi
           echo "tools=$tools" >> "$GITHUB_OUTPUT"
-          # Gemini CLI settings: the coreTools allow-list is the
-          # Gemini analogue of Claude's --allowedTools grant; the
-          # same read verbs, the same wrapper in live mode.
+          # Gemini CLI settings: tools.core is the Gemini analogue
+          # of Claude's --allowedTools grant — the same read verbs,
+          # the same wrapper in live mode — and model.maxSessionTurns
+          # carries the turn ceiling (nested per the settings
+          # schema the pinned action documents).
           live='false'
           if [ "$DRY_RUN" != "true" ]; then
             live='true'
@@ -330,15 +333,19 @@ jobs:
           settings=$(jq -nc --argjson live "$live" \
             --argjson turns "$MAX_TURNS" '
             {
-              coreTools: ([
-                "run_shell_command(gh search issues)",
-                "run_shell_command(gh issue list)",
-                "run_shell_command(gh issue view)",
-                "run_shell_command(gh label list)"
-              ] + (if $live then [
-                "run_shell_command(bash triage-assets/scripts/apply-label.sh)"
-              ] else [] end)),
-              maxSessionTurns: $turns,
+              tools: {
+                core: ([
+                  "run_shell_command(gh search issues)",
+                  "run_shell_command(gh issue list)",
+                  "run_shell_command(gh issue view)",
+                  "run_shell_command(gh label list)"
+                ] + (if $live then [
+                  "run_shell_command(bash triage-assets/scripts/apply-label.sh)"
+                ] else [] end))
+              },
+              model: {
+                maxSessionTurns: $turns
+              },
               telemetry: {
                 enabled: true,
                 target: "local",
@@ -384,7 +391,7 @@ jobs:
 
       # The Gemini engine: same prompt, same wrapper containment
       # (via env), tool grants translated to the Gemini CLI's
-      # coreTools allow-list in the settings JSON.
+      # tools.core allow-list in the settings JSON.
       - name: 'Run triage agent (Gemini) 🤖'
         id: agent-gemini
         # yamllint disable rule:line-length
@@ -403,6 +410,11 @@ jobs:
         with:
           gemini_api_key: "${{ secrets.gemini_api_key }}"
           gemini_model: "${{ steps.model.outputs.model }}"
+          # Pin the CLI itself: the action defaults this to
+          # 'latest', but the CLI enforces the tools.core allow-list
+          # and runs with --yolo, making it part of the security
+          # boundary. Bumps are deliberate, reviewed edits.
+          gemini_cli_version: '0.55.1'
           prompt: "${{ steps.prompt.outputs.prompt }}"
           settings: "${{ steps.prompt.outputs.gemini_settings }}"
           # The pipeline uploads its own evidence bundle; the

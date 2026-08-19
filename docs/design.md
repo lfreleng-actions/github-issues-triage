@@ -637,14 +637,14 @@ CLI non-interactively against a `prompt` input — the same shape as
 | Harness | `anthropics/claude-code-action` | `google-github-actions/run-gemini-cli` |
 | Prompt | `prompt` input (assembled §6) | `prompt` input (same assembly, unchanged) |
 | Model | `--model` via `claude_args` | `gemini_model` input |
-| Tool containment | `--allowedTools` grant list | `settings` JSON: `coreTools` with `run_shell_command(...)` allow-list |
+| Tool containment | `--allowedTools` grant list | `settings` JSON: `tools.core` with `run_shell_command(...)` allow-list |
 | Session transcript | `execution_file` output | `upload_artifacts` / CLI telemetry log (verify exact contract) |
-| Turn ceiling | `--max-turns` | `maxSessionTurns` in settings JSON |
+| Turn ceiling | `--max-turns` | `model.maxSessionTurns` in settings JSON |
 
 <!-- markdownlint-enable MD013 -->
 
 The tool containment translates directly: the Gemini CLI's
-`coreTools` allow-list grants specific shell commands, so the
+`tools.core` allow-list grants specific shell commands, so the
 Gemini session receives the same read verbs plus the same
 constrained `apply-label.sh` wrapper in live mode — the wrapper's
 scope/exclusion/PR-rejection enforcement is engine-independent by
@@ -665,8 +665,9 @@ choice); the `model` input overrides it per run.
 
 Delivered: the `engine` input with mutually exclusive agent
 steps, the engine-aware key guard and model resolution, Gemini
-`settings` assembly (coreTools allow-list, `maxSessionTurns`,
-telemetry into the artefact directory), session-summary capture,
+`settings` assembly (`tools.core` allow-list,
+`model.maxSessionTurns`, telemetry into the artefact directory),
+session-summary capture,
 and the `engine` choice on the manual dry-run dispatch. The
 schedule stays on the Claude engine until the org validates
 Gemini output quality.
