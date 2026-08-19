@@ -51,7 +51,8 @@ def load_snapshot(path: Path) -> dict[tuple[str, int], Issue]:
     raw: list[dict[str, Any]] = json.loads(path.read_text(encoding="utf-8"))
     issues: dict[tuple[str, int], Issue] = {}
     for entry in raw:
-        repo = str(entry.get("repository", {}).get("name", UNKNOWN))
+        repository: dict[str, Any] = entry.get("repository") or {}
+        repo = str(repository.get("name", UNKNOWN))
         issue = Issue(
             repo=repo,
             number=int(entry.get("number", 0)),
