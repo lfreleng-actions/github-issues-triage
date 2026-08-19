@@ -118,11 +118,6 @@ jobs:
     concurrency:
       group: "issues-triage-${{ github.repository }}-${{ inputs.org }}"
       cancel-in-progress: false
-    # No job-level permissions block: the job inherits the caller's
-    # grant, so callers scope the fallback github.token themselves
-    # (issues: read suffices for dry-run; live labelling without an
-    # App needs issues: write). The App-token path carries its own
-    # org-wide issues:write permission independent of this grant.
     steps:
       # Load an egress allow-list for block mode. In audit mode the
       # step does not run and harden-runner records outbound calls
