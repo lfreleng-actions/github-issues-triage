@@ -452,7 +452,8 @@ Interface of the reusable workflow:
 | Input | Default | Purpose |
 | ----- | ------- | ------- |
 | `org` | (required) | GitHub organisation or user to triage |
-| `model` | `claude-opus-5` | Model passed to Claude Code |
+| `engine` | `claude` | Agent engine: `claude` or `gemini` |
+| `model` | engine default | Model; empty resolves per engine (§12) |
 | `dry_run` | `true` | Report intended labels; apply nothing |
 | `retriage` | `false` | Re-examine issues that carry labels |
 | `skip_agent` | `false` | Plumbing test: skip the agent session (secretless) |
@@ -467,7 +468,8 @@ Interface of the reusable workflow:
 
 | Secret | Required | Purpose |
 | ------ | -------- | ------- |
-| `anthropic_api_key` | unless `skip_agent` | Anthropic API authentication |
+| `anthropic_api_key` | claude runs, unless `skip_agent` | Anthropic API authentication |
+| `gemini_api_key` | gemini runs, unless `skip_agent` | Gemini API (AI Studio) authentication |
 | `github_app_private_key` | no | Pairs with `github_app_client_id` |
 
 <!-- markdownlint-enable MD013 -->
@@ -598,3 +600,96 @@ README.md                                    # rewritten for this repo
    Untriaged column.
 6. **Phase 2 (separate design discussion)** — Slack reporting,
    duplicate detection, stale-issue nudges, PR triage.
+
+## 12. Second Engine: Google Gemini
+
+**Status:** Implemented; resolved decisions recorded below.
+
+IT direction steers most agentic work towards Google
+Gemini, so the pipeline gains a second agent engine. The
+architecture already isolates the provider: snapshots, exclusion
+filtering, the policy prompt, the label wrapper, diff reporting,
+and artefact capture are all engine-neutral. The agent session is
+the single provider-specific step.
+
+### 12.1 Engine selection
+
+The reusable workflow gains an `engine` input (`claude` |
+`gemini`, default `claude`), selecting between two mutually
+exclusive agent-session steps. One reusable workflow, one
+evidence pipeline, one policy prompt — two interchangeable
+engines. A separate reusable per engine would duplicate the
+evidence pipeline and let the copies drift; the single-workflow
+design keeps every hardening decision (§5–§7) applying to both
+engines by construction.
+
+### 12.2 Gemini harness
+
+[`google-github-actions/run-gemini-cli`](https://github.com/google-github-actions/run-gemini-cli)
+(Google's official action, verified at v0.1.22) runs the Gemini
+CLI non-interactively against a `prompt` input — the same shape as
+`claude-code-action`. Key mappings:
+
+<!-- markdownlint-disable MD013 -->
+
+| Concern | Claude engine | Gemini engine |
+| ------- | ------------- | ------------- |
+| Harness | `anthropics/claude-code-action` | `google-github-actions/run-gemini-cli` |
+| Prompt | `prompt` input (assembled §6) | `prompt` input (same assembly, unchanged) |
+| Model | `--model` via `claude_args` | `gemini_model` input |
+| Tool containment | `--allowedTools` grant list | `settings` JSON: `tools.core` with `run_shell_command(...)` allow-list |
+| Session transcript | `execution_file` output | `upload_artifacts` / CLI telemetry log (verify exact contract) |
+| Turn ceiling | `--max-turns` | `model.maxSessionTurns` in settings JSON |
+
+<!-- markdownlint-enable MD013 -->
+
+The tool containment translates directly: the Gemini CLI's
+`tools.core` allow-list grants specific shell commands, so the
+Gemini session receives the same read verbs plus the same
+constrained `apply-label.sh` wrapper in live mode — the wrapper's
+scope/exclusion/PR-rejection enforcement is engine-independent by
+design.
+
+### 12.3 Authentication
+
+Resolved: **`GEMINI_API_KEY`** (AI Studio), a repository secret
+mirroring the Anthropic arrangement (§3.2). Vertex AI via
+Workload Identity Federation (keyless OIDC) remains available as
+a later increment — the harness supports it — without breaking
+the interface.
+
+The default Gemini model is **`gemini-3.5-flash-lite`** (IT
+choice); the `model` input overrides it per run.
+
+### 12.4 Work items
+
+Delivered: the `engine` input with mutually exclusive agent
+steps, the engine-aware key guard and model resolution, Gemini
+`settings` assembly (`tools.core` allow-list,
+`model.maxSessionTurns`, telemetry into the artefact directory),
+session-summary capture,
+and the `engine` choice on the manual dry-run dispatch. The
+schedule stays on the Claude engine until the org validates
+Gemini output quality.
+
+Remaining:
+
+1. Transcript fidelity: confirm the Gemini telemetry log carries
+   turn-by-turn content matching the §7.2 evidence guarantee, and
+   map its cost/turn fields in `load_transcript_stats`
+   (defensive parsing means unmapped fields drop out rather than
+   break the report)
+2. Egress: audit-mode Gemini run to harvest endpoints
+   (`generativelanguage.googleapis.com:443` expected) for the org
+   allow-list, as §7.1 did for Anthropic
+3. README consumption example for the Gemini engine
+
+### 12.5 Open questions (Gemini track)
+
+1. **Transcript fidelity** — does the Gemini CLI emit a
+   turn-by-turn structured log matching what Claude Code's
+   `execution_file` provides? The §7.2 evidence guarantee must
+   hold for both engines.
+2. **Billing ownership** — which GCP project/billing account
+   carries the spend, and what is the Gemini analogue of the
+   per-workspace spend cap?

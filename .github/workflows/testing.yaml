@@ -21,6 +21,14 @@ name: 'Testing 🧪'
 on:
   pull_request:
   workflow_dispatch:
+    inputs:
+      engine:
+        description: 'Agent engine for the manual dry-run'
+        type: choice
+        options:
+          - claude
+          - gemini
+        default: 'claude'
 
 permissions: {}
 
@@ -62,6 +70,9 @@ jobs:
       # Re-examine labelled issues so the agent session always runs
       # and the report always carries proposals to inspect.
       retriage: true
+      # Operator's choice of engine; empty guards against direct
+      # API dispatches that omit the input.
+      engine: "${{ inputs.engine || 'claude' }}"
       # Bound the session cost on test runs.
       max_turns: '40'
       egress_policy: 'audit'
@@ -69,3 +80,4 @@ jobs:
       assets_ref: "${{ github.sha }}"
     secrets:
       anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+      gemini_api_key: ${{ secrets.GEMINI_API_KEY }}

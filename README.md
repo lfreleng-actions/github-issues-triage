@@ -11,10 +11,14 @@ SPDX-FileCopyrightText: 2026 The Linux Foundation
 <!-- prettier-ignore-end -->
 
 Scheduled AI triage of GitHub issues. A reusable workflow scans an
-organisation's open issues, runs a Claude Code agent session that
-applies category labels per a versioned policy prompt, and attaches
-full run evidence to the workflow run: before/after snapshots, the
-complete agent session transcript, and a diff-based report.
+organisation's open issues, runs an agent session — **Claude Code
+or the Gemini CLI**, selected per run — that applies category
+labels per a versioned policy prompt, and attaches full run
+evidence to the workflow run: before/after snapshots,
+engine-specific session evidence (Claude: a turn-by-turn
+transcript; Gemini: telemetry plus the session summary, with
+transcript fidelity under verification — design doc §12), and a
+diff-based report.
 
 The [design document](docs/design.md) covers the architecture,
 containment model, and rollout plan in full.
@@ -82,7 +86,8 @@ mint time.
 | Input | Default | Purpose |
 | ----- | ------- | ------- |
 | `org` | (required) | GitHub organisation or user to triage |
-| `model` | `claude-opus-5` | Model passed to Claude Code |
+| `engine` | `claude` | Agent engine: `claude` or `gemini` |
+| `model` | engine default | `claude-opus-5` / `gemini-3.5-flash-lite` |
 | `dry_run` | `true` | Report intended labels; apply nothing |
 | `retriage` | `false` | Re-examine issues that carry labels |
 | `skip_agent` | `false` | Plumbing test: skip the agent session |
@@ -97,7 +102,8 @@ mint time.
 
 | Secret | Required | Purpose |
 | ------ | -------- | ------- |
-| `anthropic_api_key` | unless `skip_agent` | Anthropic API authentication |
+| `anthropic_api_key` | claude runs, unless `skip_agent` | Anthropic API authentication |
+| `gemini_api_key` | gemini runs, unless `skip_agent` | Gemini API (AI Studio) authentication |
 | `github_app_private_key` | no | Pairs with `github_app_client_id` |
 
 <!-- markdownlint-enable MD013 -->
