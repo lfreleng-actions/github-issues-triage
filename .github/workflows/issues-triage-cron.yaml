@@ -7,10 +7,10 @@
 # lfreleng-actions organisation.
 #
 # Scheduled runs stay in dry-run until the rollout completes (see
-# docs/design.md section 11); a manual dispatch can go live by
-# unticking dry_run. Egress runs in audit mode until the agent
-# session's endpoints land in the org allow-list, then flips to
-# block with the tagged allow-list loaded by
+# docs/development/DESIGN.md section 11); a manual dispatch can go
+# live by unticking dry_run. Egress runs in audit mode until the
+# agent session's endpoints land in the org allow-list, then flips
+# to block with the tagged allow-list loaded by
 # harden-runner-block-action.
 name: 'Issues Triage ⏰'
 

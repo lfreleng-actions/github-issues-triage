@@ -21,8 +21,10 @@ summary, with transcript fidelity under verification — design doc
 §12; Copilot: CLI logs plus the shared session transcript), and a
 diff-based report.
 
-The [design document](docs/design.md) covers the architecture,
-containment model, and rollout plan in full.
+Per-engine setup — credentials, permissions, and the checks that
+prove them — lives in [`docs/setup/`](docs/setup/README.md). The
+[design document](docs/development/DESIGN.md) covers the
+architecture, containment model, and rollout plan in full.
 
 ## How it works
 

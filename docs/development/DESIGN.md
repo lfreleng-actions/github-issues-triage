@@ -539,7 +539,11 @@ workflow, not a reusable one, so much of the skeleton does not apply.
 ### Add (new)
 
 ```text
-docs/design.md                               # this document
+docs/development/DESIGN.md                   # this document
+docs/setup/README.md                         # setup index
+docs/setup/ANTHROPIC.md                      # Claude engine setup
+docs/setup/GOOGLE.md                         # Gemini engine setup
+docs/setup/GITHUB.md                         # Copilot engine setup
 prompt/triage.md                             # the agent's triage policy
 config/excluded-repos.txt                    # repos the scan skips
 scripts/snapshot.sh                          # issue-state capture
