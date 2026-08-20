@@ -123,4 +123,3 @@ repos:
         files: ^\.github/workflows/[^/]+$
         types:
           - yaml
-      - id: check-readthedocs

@@ -21,8 +21,14 @@ summary, with transcript fidelity under verification — design doc
 §12; Copilot: CLI logs plus the shared session transcript), and a
 diff-based report.
 
-The [design document](docs/design.md) covers the architecture,
-containment model, and rollout plan in full.
+## 📚 Documentation
+
+<https://lfreleng-actions.github.io/github-issues-triage/>
+
+Per-engine setup — credentials, permissions, and the checks that
+prove them — lives in [`docs/setup/`](docs/setup/README.md). The
+[design document](docs/development/DESIGN.md) covers the
+architecture, containment model, and rollout plan in full.
 
 ## How it works
 
@@ -112,13 +118,13 @@ Where that policy is unavailable, pass a fine-grained PAT holding
 the "Copilot Requests" permission as `copilot_token` instead and
 drop the `copilot-requests` grant.
 
-Either way the credential carries **no repository write access**:
-labels travel over the App token alone. Note the two routes differ
-in what else they carry. A PAT scoped to Copilot Requests reaches
-nothing but the model. The caller `GITHUB_TOKEN` also carries
-whatever else that job grants — `issues: read` and
-`contents: read` in the example above — so the guarantee there is
-the absence of write, not the absence of repository access.
+Labels travel over the App token alone; the Copilot credential is
+never the App token. What else that credential can reach depends
+on the route. A PAT scoped to Copilot Requests reaches nothing
+but the model. The caller `GITHUB_TOKEN` carries whatever the
+calling job grants — `issues: read` and `contents: read` in the
+example above — so grant that job reads alone, or the model
+credential becomes write-capable too.
 
 The reusable workflow does not declare `copilot-requests` itself:
 a called workflow can narrow the caller's permissions but never
@@ -144,7 +150,7 @@ mint time.
 | ----- | ------- | ------- |
 | `org` | (required) | GitHub organisation or user to triage |
 | `engine` | `claude` | Agent engine: `claude`, `gemini`, or `copilot` |
-| `model` | engine default | `claude-opus-5` / `gemini-3.5-flash-lite` / `claude-sonnet-4.6` |
+| `model` | engine default | `claude-opus-5` / `gemini-3.5-flash-lite` / `claude-sonnet-5` |
 | `dry_run` | `true` | Report intended labels; apply nothing |
 | `retriage` | `false` | Re-examine issues that carry labels |
 | `skip_agent` | `false` | Plumbing test: skip the agent session |
@@ -175,6 +181,7 @@ mint time.
 | `issues-triage.yaml` | The reusable pipeline | `workflow_call` |
 | `issues-triage-cron.yaml` | Org triage caller | 07:00 UTC weekdays / dispatch |
 | `testing.yaml` | Secretless plumbing test / manual dry-run | Pull request / dispatch |
+| `documentation.yaml` | Build and publish the docs site | Push to `main` / dispatch |
 | `release.yaml` | Promote draft release on tag push | Tag push |
 
 <!-- markdownlint-enable MD013 -->
@@ -198,8 +205,11 @@ mint time.
   design doc §13.4 lands
 - **Token scope**: App tokens carry `issues: write` and
   `metadata: read`, down-scoped at mint time, expiring in an hour.
-  Model credentials stay separate and never carry repository
-  write, leaving the App token as the sole route to a label
+  The model credential is never the App token: the Anthropic and
+  Gemini keys carry no GitHub permissions at all, and a Copilot
+  PAT scoped to Copilot Requests reaches nothing but the model.
+  The Copilot route that reuses a caller `GITHUB_TOKEN` carries
+  whatever that job grants, so grant such a job reads alone
 - **Prompt-injection defence**: the policy prompt instructs the
   agent to treat issue text as data; containment limits the worst
   case to a wrong label
@@ -212,6 +222,14 @@ Run the linting suite before pushing:
 
 ```bash
 uvx pre-commit run --all-files
+```
+
+Build and preview the documentation site locally:
+
+```bash
+uv venv --python 3.13
+uv pip install --require-hashes --requirement docs/requirements.txt
+.venv/bin/mkdocs serve
 ```
 
 The report generator has a strict type-checking gate
