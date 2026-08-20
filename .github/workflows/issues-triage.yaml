@@ -5,16 +5,17 @@
 # Reusable AI issues-triage workflow.
 #
 # Scans the open issues of an organisation (or a single repository),
-# runs an agent session — Claude Code or the Gemini CLI, selected by
-# the engine input — that applies category labels per the bundled
-# prompt/triage.md policy, and attaches full run evidence to the
-# workflow run: before/after issue snapshots, engine-specific
-# session evidence (Claude: a turn-by-turn transcript; Gemini:
-# telemetry plus the session summary), and a diff-based report that
-# also lands in the step summary.
+# runs an agent session — Claude Code, the Gemini CLI, or the
+# GitHub Copilot CLI, selected by the engine input — that applies
+# category labels per the bundled prompt/triage.md policy, and
+# attaches full run evidence to the workflow run: before/after issue
+# snapshots, engine-specific session evidence (Claude: a turn-by-turn
+# transcript; Gemini: telemetry plus the session summary; Copilot:
+# CLI logs plus the shared session transcript), and a diff-based
+# report that also lands in the step summary.
 #
 # Consumers outside this organisation supply their own tokens: a
-# model API key matching the engine, plus a GitHub App (client id
+# model credential matching the engine, plus a GitHub App (client id
 # input and private-key secret) for any run that applies labels.
 # Without App credentials the pipeline runs read-only: dry-run
 # reports work with the caller's github.token, and live runs refuse
@@ -33,14 +34,15 @@ on:
         required: true
         type: string
       engine:
-        description: 'Agent engine: claude or gemini'
+        description: 'Agent engine: claude, gemini, or copilot'
         type: string
         default: 'claude'
       model:
         description: >-
           Model for the agent session. Empty (the default) resolves
           the engine default: claude-opus-5 for claude,
-          gemini-3.5-flash-lite for gemini.
+          gemini-3.5-flash-lite for gemini, claude-sonnet-4.6 for
+          copilot.
         type: string
         default: ''
       dry_run:
@@ -64,7 +66,10 @@ on:
         type: string
         default: ''
       max_turns:
-        description: 'Agent session turn ceiling'
+        description: >-
+          Agent session turn ceiling. The copilot engine ignores
+          this: the Copilot CLI exposes no turn cap, so that engine
+          is bounded by the agent step's timeout alone.
         type: string
         default: '80'
       egress_policy:
@@ -102,6 +107,16 @@ on:
         description: >-
           Gemini API key (AI Studio); needed when engine is gemini
           unless skip_agent is true. The same guard applies.
+        required: false
+      copilot_token:
+        description: >-
+          Token authorising Copilot model requests; needed when
+          engine is copilot unless skip_agent is true. Either a
+          fine-grained PAT carrying the 'Copilot Requests'
+          permission, or the calling job's GITHUB_TOKEN where that
+          job grants 'copilot-requests: write' (secretless, billed
+          to the organisation). Deliberately distinct from the App
+          token that performs the labelling — see the agent step.
         required: false
       github_app_private_key:
         description: 'GitHub App private key (with github_app_client_id)'
@@ -165,9 +180,9 @@ jobs:
           exit 1
 
       # Validate the engine, resolve the model default, and check
-      # that the matching API key arrived; fail fast before any
+      # that the matching credential arrived; fail fast before any
       # spend. skip_agent runs are secretless by design, so they
-      # bypass the key check (never the engine validation).
+      # bypass the credential check (never the engine validation).
       - name: 'Resolve engine and model 🚦'
         id: model
         env:
@@ -176,6 +191,7 @@ jobs:
           SKIP_AGENT: "${{ inputs.skip_agent }}"
           ANTHROPIC_KEY: "${{ secrets.anthropic_api_key }}"
           GEMINI_KEY: "${{ secrets.gemini_api_key }}"
+          COPILOT_KEY: "${{ secrets.copilot_token }}"
         run: |
           case "$ENGINE" in
             claude)
@@ -188,9 +204,14 @@ jobs:
               key="$GEMINI_KEY"
               key_name='gemini_api_key'
               ;;
+            copilot)
+              default_model='claude-sonnet-4.6'
+              key="$COPILOT_KEY"
+              key_name='copilot_token'
+              ;;
             *)
-              echo "::error::Unknown engine '$ENGINE'; use claude" \
-                "or gemini."
+              echo "::error::Unknown engine '$ENGINE'; use claude," \
+                "gemini, or copilot."
               exit 1
               ;;
           esac
@@ -355,6 +376,35 @@ jobs:
               }
             }')
           echo "gemini_settings=$settings" >> "$GITHUB_OUTPUT"
+          # Copilot CLI grants. Two readings of its shell matching
+          # exist and the documentation supports both: the CLI
+          # reference describes ':*' as "the command stem followed
+          # by a space", while GitHub's own gh-aw compiler
+          # documents the bare form as a prefix match. Emit both
+          # forms of every pattern. Whichever reading holds, one
+          # matches; neither widens the grant, because both anchor
+          # on the same command.
+          patterns() {
+            for cmd in "$@"; do
+              printf 'shell(%s),shell(%s:*),' "$cmd" "$cmd"
+            done
+          }
+          allow_cmds=('gh search issues' 'gh issue list'
+            'gh issue view' 'gh label list')
+          if [ "$DRY_RUN" != "true" ]; then
+            allow_cmds+=(
+              'bash triage-assets/scripts/apply-label.sh')
+          fi
+          allow="$(patterns "${allow_cmds[@]}")"
+          echo "copilot_allow=${allow%,}" >> "$GITHUB_OUTPUT"
+          # Deny rules outrank every allow rule and any approval the
+          # CLI would otherwise infer, so they restate the
+          # containment the allow-list already implies: the wrapper
+          # applies labels, never the agent through gh issue edit.
+          deny_cmds=('git' 'gh pr' 'gh issue edit' 'gh issue close'
+            'gh issue comment')
+          deny="write,$(patterns "${deny_cmds[@]}")"
+          echo "copilot_deny=${deny%,}" >> "$GITHUB_OUTPUT"
 
       - name: 'Run triage agent (Claude) 🤖'
         id: agent
@@ -421,11 +471,117 @@ jobs:
           # action's uploader would duplicate it.
           upload_artifacts: false
 
+      # The Copilot engine runs the CLI itself rather than a vendor
+      # action: GitHub publishes no first-party Copilot CLI action,
+      # and its recommended alternative (github/gh-aw) compiles
+      # whole workflows from Markdown, which would replace this
+      # pipeline instead of plugging into it. See docs/design.md
+      # section 13. The CLI needs Node 22 or newer, which the runner
+      # image does not guarantee.
+      - name: 'Set up Node.js (Copilot engine) 🟩'
+        # yamllint disable rule:line-length
+        if: >-
+          ${{ inputs.engine == 'copilot' && !inputs.skip_agent &&
+          (steps.before.outputs.pending != '0' || inputs.retriage) }}
+        # yamllint enable rule:line-length
+        # yamllint disable-line rule:line-length
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '22'
+
+      # Pin the CLI: it enforces the tool allow-list and therefore
+      # sits inside the security boundary, exactly as the Gemini
+      # engine pins gemini_cli_version. Bumps are reviewed edits.
+      #
+      # A global CLI install has no lockfile to pin against, so the
+      # exact version below is the pin; zizmor's adhoc-packages
+      # audit wants a lockfile that cannot exist here.
+      - name: 'Install Copilot CLI 📦'
+        # yamllint disable rule:line-length
+        if: >-
+          ${{ inputs.engine == 'copilot' && !inputs.skip_agent &&
+          (steps.before.outputs.pending != '0' || inputs.retriage) }}
+        # yamllint enable rule:line-length
+        env:
+          COPILOT_CLI_VERSION: '1.0.80'
+        run: |  # zizmor: ignore[adhoc-packages] version pinned above
+          npm install -g "@github/copilot@$COPILOT_CLI_VERSION"
+          copilot --version
+
+      - name: 'Run triage agent (Copilot) 🤖'
+        id: agent-copilot
+        # yamllint disable rule:line-length
+        if: >-
+          ${{ inputs.engine == 'copilot' && !inputs.skip_agent &&
+          (steps.before.outputs.pending != '0' || inputs.retriage) }}
+        # yamllint enable rule:line-length
+        # No turn ceiling exists for this engine (max_turns has no
+        # Copilot CLI analogue), so this timeout is the only bound
+        # on a runaway session.
+        timeout-minutes: 20
+        env:
+          # Two tokens, two jobs. The CLI reads
+          # COPILOT_GITHUB_TOKEN ahead of GH_TOKEN, so setting both
+          # keeps model access and repository access separate: the
+          # App installation token never reaches the Copilot backend
+          # (which does not accept installation tokens anyway), and
+          # the Copilot token never gains issues:write.
+          COPILOT_GITHUB_TOKEN: "${{ secrets.copilot_token }}"
+          GH_TOKEN: "${{ steps.app-token.outputs.token || github.token }}"
+          TRIAGE_ORG: "${{ inputs.org }}"
+          TRIAGE_REPOSITORY: "${{ inputs.repository }}"
+          TRIAGE_EXCLUDE_FILE: 'artefacts/excluded-repos.txt'
+          # Keep CLI configuration and session state in the runner's
+          # scratch space, so nothing persists in the home directory
+          # between steps or influences the session.
+          COPILOT_HOME: "${{ runner.temp }}/copilot"
+          MODEL: "${{ steps.model.outputs.model }}"
+          ALLOW_TOOLS: "${{ steps.prompt.outputs.copilot_allow }}"
+          DENY_TOOLS: "${{ steps.prompt.outputs.copilot_deny }}"
+          # Shell tools and nothing else. --available-tools is the
+          # CLI's hard limit ('the model won't be able to use it at
+          # all'), unlike --allow-tool, which pre-approves commands
+          # but leaves read-only shell auto-approved. This drops
+          # file writes, patching, web_fetch, skills, and subagents
+          # out of reach entirely.
+          AVAILABLE_TOOLS: >-
+            bash,list_bash,read_bash,stop_bash,write_bash
+        run: |
+          mkdir -p artefacts/copilot-logs
+          prompt="$(cat artefacts/prompt.md)"
+          # --disable-builtin-mcps removes the bundled GitHub MCP
+          #   server, whose label_write tool would otherwise offer a
+          #   route around apply-label.sh
+          # --no-custom-instructions stops AGENTS.md and friends in
+          #   the assets checkout from steering the session
+          # --no-ask-user keeps the session autonomous; without it a
+          #   question would stall until the timeout
+          # --secret-env-vars covers GH_TOKEN: the CLI redacts
+          #   GITHUB_TOKEN and COPILOT_GITHUB_TOKEN by default but
+          #   not the App token, which this step writes into logs
+          #   and a transcript that ship in a 90-day artefact
+          copilot \
+            --prompt="$prompt" \
+            --model="$MODEL" \
+            --available-tools="$AVAILABLE_TOOLS" \
+            --allow-tool="$ALLOW_TOOLS" \
+            --deny-tool="$DENY_TOOLS" \
+            --secret-env-vars="GH_TOKEN,COPILOT_GITHUB_TOKEN" \
+            --no-ask-user \
+            --no-custom-instructions \
+            --disable-builtin-mcps \
+            --no-auto-update \
+            --no-color \
+            --log-dir=artefacts/copilot-logs \
+            --share=artefacts/session-summary.md
+
       # Preserve the full session transcript for debugging, whatever
       # the session outcome. The failure cases are precisely the runs
       # that need it. Claude exposes a structured execution log;
       # Gemini's telemetry writes into artefacts/ directly (see the
-      # settings JSON) and its summary output lands beside it.
+      # settings JSON) and its summary output lands beside it;
+      # Copilot writes its logs and shared transcript into
+      # artefacts/ itself.
       - name: 'Preserve session transcript 📜'
         if: always() && steps.before.outcome == 'success'
         env:
@@ -437,6 +593,8 @@ jobs:
             echo "Transcript preserved from: $EXECUTION_FILE"
           elif [ -f artefacts/gemini-telemetry.json ]; then
             echo "Gemini telemetry captured in artefacts/"
+          elif [ -d artefacts/copilot-logs ]; then
+            echo "Copilot session logs captured in artefacts/"
           else
             echo "No session transcript to preserve"
           fi
@@ -444,6 +602,8 @@ jobs:
             printf '%s\n' "$GEMINI_SUMMARY" \
               > artefacts/session-summary.md
             echo "Gemini session summary preserved"
+          elif [ -f artefacts/session-summary.md ]; then
+            echo "Session summary already present in artefacts/"
           fi
 
       - name: 'Snapshot issues (after) 📸'
