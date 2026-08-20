@@ -89,3 +89,39 @@ jobs:
       # nor the SchemaStore workflow schema recognises that scope
       # yet, so declaring it here would fail the linting gate.
       copilot_token: ${{ secrets.COPILOT_CLI_TOKEN }}
+
+  docs:
+    name: 'Documentation build'
+    if: github.event_name == 'pull_request'
+    runs-on: 'ubuntu-latest'
+    permissions:
+      contents: read  # Check out the documentation sources
+    timeout-minutes: 10
+    steps:
+      - name: 'Harden runner'
+        # yamllint disable-line rule:line-length
+        uses: step-security/harden-runner@b09bb98e06d4d774595224525879c09bc6e98c40  # v2.20.1
+        with:
+          egress-policy: 'audit'
+
+      - name: 'Checkout repository'
+        # yamllint disable-line rule:line-length
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: 'Install uv'
+        # yamllint disable-line rule:line-length
+        uses: astral-sh/setup-uv@ae62891fec2bb8e7d6c99fc78c9fec3a63790f8d  # v10.0.0
+        with:
+          enable-cache: false
+
+      # Proves the site builds from the pull request head without
+      # granting it any Pages permission; the deployment lives in
+      # documentation.yaml and runs from the default branch alone.
+      - name: 'Build documentation'
+        shell: bash
+        run: |
+          uv run --no-project \
+            --with-requirements docs/requirements.txt \
+            mkdocs build --strict

@@ -95,8 +95,8 @@ credential fails later, inside the session.
 
 ## Further reading
 
-- [`../development/DESIGN.md`](../development/DESIGN.md) — the
-  architecture, containment model, and the reasoning behind each
-  engine's integration
-- [`../../README.md`](../../README.md) — consuming the reusable
-  workflow from another repository
+- [Design](../development/DESIGN.md) — the architecture, the
+  containment model, and the reasoning behind each engine's
+  integration
+- [Repository README](https://github.com/lfreleng-actions/github-issues-triage#consuming-the-reusable-workflow)
+  — calling the reusable workflow from another repository

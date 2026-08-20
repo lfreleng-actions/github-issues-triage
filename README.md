@@ -21,6 +21,10 @@ summary, with transcript fidelity under verification — design doc
 §12; Copilot: CLI logs plus the shared session transcript), and a
 diff-based report.
 
+## 📚 Documentation
+
+<https://lfreleng-actions.github.io/github-issues-triage/>
+
 Per-engine setup — credentials, permissions, and the checks that
 prove them — lives in [`docs/setup/`](docs/setup/README.md). The
 [design document](docs/development/DESIGN.md) covers the
@@ -177,6 +181,7 @@ mint time.
 | `issues-triage.yaml` | The reusable pipeline | `workflow_call` |
 | `issues-triage-cron.yaml` | Org triage caller | 07:00 UTC weekdays / dispatch |
 | `testing.yaml` | Secretless plumbing test / manual dry-run | Pull request / dispatch |
+| `documentation.yaml` | Build and publish the docs site | Push to `main` / dispatch |
 | `release.yaml` | Promote draft release on tag push | Tag push |
 
 <!-- markdownlint-enable MD013 -->
@@ -214,6 +219,13 @@ Run the linting suite before pushing:
 
 ```bash
 uvx pre-commit run --all-files
+```
+
+Build and preview the documentation site locally:
+
+```bash
+uv run --no-project --with-requirements docs/requirements.txt \
+  mkdocs serve
 ```
 
 The report generator has a strict type-checking gate

@@ -1,0 +1,7 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Linux Foundation
+
+# Documentation build dependencies. Pinned exactly so a site build
+# stays reproducible and Dependabot raises a reviewable bump; the
+# documentation workflow installs this file and nothing else.
+mkdocs-material==9.7.7

@@ -508,7 +508,6 @@ workflow, not a reusable one, so much of the skeleton does not apply.
 - `.github/workflows/openssf-scorecard.yaml`, `release-drafter.yaml`,
   `clear-action-cache.yaml`
 - `.github/actionlint.yaml`, `.github/dependabot.yml`
-- `.readthedocs.yml` — kept: this repository now carries `docs/`
 - `LICENSES/`, `SECURITY.md`
 
 ### Remove (template skeletons that do not apply)
@@ -525,6 +524,10 @@ workflow, not a reusable one, so much of the skeleton does not apply.
   agent dry-run runs from `workflow_dispatch`, a maintainer-
   triggered, trusted execution path.
 - `examples/` (build-test-release / merge examples)
+- `.readthedocs.yml` — the template's Read the Docs config assumed a
+  Sphinx tree and an installable Python package, and this repository
+  is neither; the documentation site builds with MkDocs and publishes
+  to GitHub Pages instead
 
 ### Import from `actions-template`
 
@@ -540,10 +543,13 @@ workflow, not a reusable one, so much of the skeleton does not apply.
 
 ```text
 docs/development/DESIGN.md                   # this document
+docs/index.md                                # docs site home
 docs/setup/README.md                         # setup index
 docs/setup/ANTHROPIC.md                      # Claude engine setup
 docs/setup/GOOGLE.md                         # Gemini engine setup
 docs/setup/GITHUB.md                         # Copilot engine setup
+docs/requirements.txt                        # pinned docs toolchain
+mkdocs.yml                                   # docs site configuration
 prompt/triage.md                             # the agent's triage policy
 config/excluded-repos.txt                    # repos the scan skips
 scripts/snapshot.sh                          # issue-state capture
@@ -551,6 +557,7 @@ scripts/triage_report.py                     # snapshot diff -> report
 .github/workflows/issues-triage.yaml         # reusable (workflow_call)
 .github/workflows/issues-triage-cron.yaml    # scheduled thin caller
 .github/workflows/testing.yaml               # PR dry-run of the above
+.github/workflows/documentation.yaml         # docs build and deploy
 README.md                                    # rewritten for this repo
 ```
 

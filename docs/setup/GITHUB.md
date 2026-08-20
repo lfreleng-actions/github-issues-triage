@@ -10,7 +10,7 @@ version and invoked directly — no first-party action exists.
 Authenticates with a GitHub token rather than a model API key, so
 this engine adds no third vendor relationship.
 
-> [!WARNING]
+> **⚠️ Not for live or scheduled runs.**
 > This engine holds a weaker containment boundary than the other
 > two. Its tool allow-list is an approval policy rather than a
 > filter, and the CLI keeps auto-approving shell commands it
