@@ -680,9 +680,9 @@ steps, the engine-aware key guard and model resolution, Gemini
 `settings` assembly (`tools.core` allow-list,
 `model.maxSessionTurns`, telemetry into the artefact directory),
 session-summary capture,
-and the `engine` choice on the manual dry-run dispatch. The
-schedule stays on the Claude engine until the org validates
-Gemini output quality.
+and the `engine` choice on the manual dry-run dispatch and the
+scheduled caller's dispatch. Scheduled runs stay on the Claude
+engine until the org validates Gemini output quality.
 
 Remaining:
 
@@ -902,8 +902,10 @@ Delivered: the `copilot` engine value, its credential guard and
 model default, the tool-surface restriction plus the
 allow/deny translation of the shared tool grants, the pinned CLI
 install, session evidence into the artefact bundle, and the
-`copilot` choice on the manual dry-run dispatch. The schedule
-stays on the Claude engine.
+`copilot` choice on the manual dry-run dispatch and the scheduled
+caller's dispatch. Scheduled runs stay on the Claude engine, and
+the scheduled caller marks this engine for dry-run evaluation
+alone until the enforcement below lands.
 
 Remaining:
 

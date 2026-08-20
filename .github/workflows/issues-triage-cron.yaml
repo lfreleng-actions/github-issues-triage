@@ -12,6 +12,11 @@
 # agent session's endpoints land in the org allow-list, then flips
 # to block with the tagged allow-list loaded by
 # harden-runner-block-action.
+#
+# Scheduled runs always take the claude engine. A manual dispatch
+# picks any of the three; per-engine credentials and their setup
+# live in docs/setup/. Treat the copilot engine as evaluation
+# only and leave dry_run ticked for it (DESIGN.md section 13.2).
 name: 'Issues Triage ⏰'
 
 # yamllint disable-line rule:truthy
@@ -21,6 +26,14 @@ on:
     - cron: '0 7 * * 1-5'
   workflow_dispatch:
     inputs:
+      engine:
+        description: 'Agent engine (copilot: dry-run evaluation only)'
+        type: choice
+        options:
+          - claude
+          - gemini
+          - copilot
+        default: 'claude'
       dry_run:
         description: 'Report intended labels; apply nothing'
         type: boolean
@@ -53,6 +66,11 @@ jobs:
     uses: ./.github/workflows/issues-triage.yaml
     with:
       org: 'lfreleng-actions'
+      # Scheduled runs hold the Claude engine; a manual dispatch
+      # takes the operator's choice. The fallback covers schedule
+      # events, which carry no inputs, and API dispatches that
+      # omit this one.
+      engine: ${{ inputs.engine || 'claude' }}
       # Scheduled runs are always dry-run during rollout; manual
       # dispatch runs take the operator's choice.
       dry_run: ${{ github.event_name == 'schedule' || inputs.dry_run }}
@@ -67,5 +85,9 @@ jobs:
       assets_repository: ${{ github.repository }}
       assets_ref: ${{ github.sha }}
     secrets:
+      # Each engine reads one of these; the reusable workflow fails
+      # fast when the selected engine's credential is absent.
       anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+      gemini_api_key: ${{ secrets.GEMINI_API_KEY }}
+      copilot_token: ${{ secrets.COPILOT_CLI_TOKEN }}
       github_app_private_key: ${{ secrets.LF_RELENG_BOT_PRIVATE_KEY }}
