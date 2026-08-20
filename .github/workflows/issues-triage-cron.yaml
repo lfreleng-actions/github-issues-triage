@@ -15,8 +15,9 @@
 #
 # Scheduled runs always take the claude engine. A manual dispatch
 # picks any of the three; per-engine credentials and their setup
-# live in docs/setup/. Treat the copilot engine as evaluation
-# only and leave dry_run ticked for it (DESIGN.md section 13.2).
+# live in docs/setup/. The copilot engine is forced to dry-run and
+# runs without App credentials whatever the operator picks, so it
+# never holds a write-capable token (DESIGN.md section 13.2).
 name: 'Issues Triage ⏰'
 
 # yamllint disable-line rule:truthy
@@ -27,7 +28,7 @@ on:
   workflow_dispatch:
     inputs:
       engine:
-        description: 'Agent engine (copilot: dry-run evaluation only)'
+        description: 'Agent engine (copilot forces dry-run, no App)'
         type: choice
         options:
           - claude
@@ -72,15 +73,30 @@ jobs:
       # omit this one.
       engine: ${{ inputs.engine || 'claude' }}
       # Scheduled runs are always dry-run during rollout; manual
-      # dispatch runs take the operator's choice.
-      dry_run: ${{ github.event_name == 'schedule' || inputs.dry_run }}
+      # dispatch runs take the operator's choice, except on the
+      # copilot engine. That engine's containment gap (DESIGN.md
+      # section 13.2) rules out live label writes, so the caller
+      # forces dry-run rather than trusting the input description.
+      dry_run: >-
+        ${{ github.event_name == 'schedule' || inputs.dry_run ||
+        inputs.engine == 'copilot' }}
       retriage: ${{ inputs.retriage || false }}
       repository: ${{ inputs.repository || '' }}
       egress_policy: 'audit'
       # The App variables live at org level; when unset the
       # reusable falls back to github.token (single-repo scope),
       # which suits dry-run rollout.
-      github_app_client_id: ${{ vars.LF_RELENG_BOT_CLIENT_ID || '' }}
+      #
+      # The copilot engine gets no App credential at all. Forcing
+      # dry-run stops the label wrapper, but the App token would
+      # still sit in that engine's shell environment as GH_TOKEN
+      # carrying issues:write, and its containment gap (DESIGN.md
+      # section 13.2) leaves auto-approved shell commands able to
+      # read it. Withholding the client id means no token gets
+      # minted, so the session falls back to github.token.
+      github_app_client_id: >-
+        ${{ inputs.engine != 'copilot' &&
+        vars.LF_RELENG_BOT_CLIENT_ID || '' }}
       # Run the pipeline with the assets from the triggering commit.
       assets_repository: ${{ github.repository }}
       assets_ref: ${{ github.sha }}

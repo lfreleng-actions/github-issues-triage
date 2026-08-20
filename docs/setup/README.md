@@ -32,9 +32,9 @@ verify the result.
 
 ### Labelling credentials (all engines)
 
-Model credentials never carry repository write access. Applying a
-label always travels over a GitHub App installation token, so live
-runs need App credentials whichever engine drives the session:
+Applying a label always travels over a GitHub App installation
+token, so live runs need App credentials whichever engine drives
+the session:
 
 <!-- markdownlint-disable MD013 -->
 
@@ -66,9 +66,12 @@ secrets work too when more than one repository calls the
 pipeline; the workflow sees nothing but the value handed to its
 named secret input.
 
-Two guides describe a credential that carries no repository
-access at all. Store those the same way — the pipeline makes no
-distinction.
+The Anthropic and Gemini keys carry no GitHub permissions at all,
+and a Copilot PAT scoped to Copilot Requests reaches nothing but
+the model. One route differs: the Copilot engine can reuse the
+calling job's `GITHUB_TOKEN`, which carries whatever permissions
+that job grants. Grant such a job reads alone — see
+[GITHUB.md](GITHUB.md).
 
 ## Verifying a new engine
 

@@ -25,7 +25,7 @@ this engine adds no third vendor relationship.
 | ---- | ----- |
 | `engine` input | `copilot` |
 | Secret | `copilot_token` |
-| Default model | `claude-sonnet-4.6` |
+| Default model | `claude-sonnet-5` |
 | Harness | `@github/copilot` CLI, pinned, installed with npm |
 | Turn ceiling | None — `max_turns` has no analogue; the 20-minute step timeout bounds the session |
 
@@ -56,10 +56,18 @@ Route A is the better credential and the one GitHub recommends.
 Route B exists for organisations that cannot enable the policy,
 and for evaluating the engine before committing to it.
 
-Neither route carries repository **write**. Labels travel over
-the GitHub App token described in [README.md](README.md), and the
-two credentials never mix — an App installation token cannot
-authenticate Copilot requests in any case.
+Neither route *needs* repository write, and route B cannot gain
+it: a PAT scoped to Copilot Requests alone reaches nothing but
+the model. Route A is not self-limiting in the same way. It hands
+the calling job's `GITHUB_TOKEN` to the CLI, so that credential
+carries every permission the job grants — grant that job nothing
+but reads plus `copilot-requests: write`, as the example below
+does, or the model credential becomes write-capable.
+
+Labels travel over the GitHub App token described in
+[README.md](README.md) either way, and the two credentials never
+mix: an App installation token cannot authenticate Copilot
+requests in any case.
 
 ## Route A: the caller's `GITHUB_TOKEN`
 
@@ -109,6 +117,18 @@ would fail every caller running a different engine. Passing the
 token in as a named secret leaves the decision with the consumer
 that wants this engine.
 
+> **⚠️ Route A remains unproven.**
+> The reusable workflow's own job declares `issues: read` and
+> `contents: read`, which narrows the `GITHUB_TOKEN` that job
+> receives. The reasoning that route A survives anyway is that
+> the secret carries a string the **caller** evaluated, and the
+> downgrade rule governs the token a called workflow receives
+> rather than a value handed to it as a named secret — the
+> pattern GitHub's own reusable-workflow documentation shows.
+> Sound, but no run has confirmed it for this scope. Route B
+> avoids the question entirely. See section 13.5 of
+> [`../development/DESIGN.md`](../development/DESIGN.md).
+
 ### 3. Cost control
 
 Organisation-metered usage bypasses per-user Copilot budgets,
@@ -150,6 +170,19 @@ the workflow schema used by `check-jsonschema` recognises the
 `copilot-requests` scope yet, so declaring it locally fails the
 repository's own linting gate. Revisit once both learn it.
 
+## Choose a model
+
+The default is **`claude-sonnet-5`**. Its predecessor,
+`claude-sonnet-4.6`, retires from Copilot Business and Enterprise
+on 2026-09-01. Override the default per run with the `model`
+input:
+
+```yaml
+with:
+  engine: 'copilot'
+  model: 'claude-haiku-4.5'
+```
+
 ## Verify
 
 ```bash
@@ -158,11 +191,17 @@ gh workflow run testing.yaml -f engine=copilot
 
 ## Egress
 
-Sessions reach `api.githubcopilot.com:443`, plus
-`registry.npmjs.org:443` and the Node distribution host used by
-`actions/setup-node` while installing the CLI. Runs with
-`egress_policy: block` need all three in the allow-list; audit
-mode records them without blocking.
+A session reaches the Copilot backend at
+`api.githubcopilot.com:443`. Installing the CLI beforehand reaches
+`registry.npmjs.org:443` and the Node distribution host that
+`actions/setup-node` uses.
+
+Treat that list as a starting point rather than a finished
+allow-list. The dependable way to build one is a run with
+`egress_policy: audit`, which records every outbound call without
+blocking; harvest the recorded endpoints, then switch to
+`block`. A hand-written list that misses an install-time endpoint
+fails the run before the session starts.
 
 ## Failure modes
 

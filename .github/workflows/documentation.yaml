@@ -15,6 +15,10 @@ name: 'Documentation 📚'
 # on manual dispatch for a republish. Pull requests build the site in
 # the testing workflow instead, which proves the build without
 # granting a pull request head any Pages permission.
+#
+# A dispatch can select any ref, so the deploy job below refuses to
+# publish anything but the default branch; dispatching another ref
+# builds the site and stops there.
 # yamllint disable-line rule:truthy
 on:
   push:
@@ -67,13 +71,16 @@ jobs:
       - name: 'Build documentation'
         shell: bash
         # This repository is not a Python package, so the build runs
-        # in an ephemeral environment holding the pinned documentation
-        # requirements and nothing else. --strict promotes MkDocs
-        # warnings (broken links, orphaned pages) to build failures.
+        # in a throwaway environment holding the documentation
+        # requirements and nothing else. --require-hashes refuses
+        # anything outside the compiled lock, so the deployed site
+        # comes from one reviewed dependency tree; --strict promotes
+        # MkDocs warnings (broken links, orphaned pages) to failures.
         run: |
-          uv run --no-project \
-            --with-requirements docs/requirements.txt \
-            mkdocs build --strict
+          uv venv --python 3.13
+          uv pip install --require-hashes \
+            --requirement docs/requirements.txt
+          .venv/bin/mkdocs build --strict
 
       - name: 'Upload Pages artifact'
         # yamllint disable-line rule:line-length
@@ -84,6 +91,10 @@ jobs:
   deploy:
     name: 'Deploy to GitHub Pages'
     needs: build
+    # workflow_dispatch accepts any ref. Publishing one would put
+    # unreviewed content on the site, so deployment stays pinned to
+    # the default branch and a dispatch elsewhere builds only.
+    if: github.ref == 'refs/heads/main'
     runs-on: 'ubuntu-latest'
     permissions:
       pages: write  # Publish the built site to GitHub Pages

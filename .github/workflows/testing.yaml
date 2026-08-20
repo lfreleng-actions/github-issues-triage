@@ -122,6 +122,7 @@ jobs:
       - name: 'Build documentation'
         shell: bash
         run: |
-          uv run --no-project \
-            --with-requirements docs/requirements.txt \
-            mkdocs build --strict
+          uv venv --python 3.13
+          uv pip install --require-hashes \
+            --requirement docs/requirements.txt
+          .venv/bin/mkdocs build --strict

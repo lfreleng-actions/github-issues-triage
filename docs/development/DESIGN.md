@@ -548,7 +548,8 @@ docs/setup/README.md                         # setup index
 docs/setup/ANTHROPIC.md                      # Claude engine setup
 docs/setup/GOOGLE.md                         # Gemini engine setup
 docs/setup/GITHUB.md                         # Copilot engine setup
-docs/requirements.txt                        # pinned docs toolchain
+docs/requirements.in                         # direct docs dependency
+docs/requirements.txt                        # compiled, hashed lock
 mkdocs.yml                                   # docs site configuration
 prompt/triage.md                             # the agent's triage policy
 config/excluded-repos.txt                    # repos the scan skips
@@ -699,7 +700,9 @@ Remaining:
    (defensive parsing means unmapped fields drop out rather than
    break the report)
 2. Egress: audit-mode Gemini run to harvest endpoints
-   (`generativelanguage.googleapis.com:443` expected) for the org
+   (`generativelanguage.googleapis.com:443` plus
+   `registry.npmjs.org:443`, which the harness reaches to install
+   the CLI) for the org
    allow-list, as §7.1 did for Anthropic
 3. README consumption example for the Gemini engine
 
@@ -853,12 +856,13 @@ Copilot CLI reads its credential from `COPILOT_GITHUB_TOKEN`,
 then `GH_TOKEN`, then `GITHUB_TOKEN`. The engine sets the first
 (model access) and the second (the App token, repository access)
 so the two never mix: an App installation token cannot
-authenticate Copilot requests, and the Copilot credential must
-never carry `issues: write`. The separation guarantees the
-absence of repository **write** on the model credential, not the
-absence of repository access: a caller `GITHUB_TOKEN` also
-carries whatever else its job grants, while a PAT scoped to
-Copilot Requests reaches nothing but the model.
+authenticate Copilot requests, and the Copilot credential is
+never the App token. What the Copilot credential *can* reach
+depends on the route. A PAT scoped to Copilot Requests reaches
+nothing but the model. A caller `GITHUB_TOKEN` carries whatever
+its job grants, so a caller that grants write hands write to the
+model credential too; the separation keeps the App token out of
+the CLI, it does not by itself bound the caller token.
 
 Two credentials work for the `copilot_token` secret:
 
@@ -899,9 +903,11 @@ reasoning holds, but no run has confirmed it for this scope yet
 (§13.5). It fails closed if wrong: the CLI rejects the token and
 the step fails with the evidence bundle intact.
 
-The default model is **`claude-sonnet-4.6`**, the CLI's own
-default, pinned explicitly so an upstream change is not a silent
-change here. The `model` input overrides it per run.
+The default model is **`claude-sonnet-5`**. The CLI's own default,
+`claude-sonnet-4.6`, retires from Copilot Business and Enterprise
+on 2026-09-01, so the engine pins the successor explicitly rather
+than inheriting a default about to disappear. The `model` input
+overrides it per run.
 
 ### 13.4 Work items
 
@@ -910,9 +916,10 @@ model default, the tool-surface restriction plus the
 allow/deny translation of the shared tool grants, the pinned CLI
 install, session evidence into the artefact bundle, and the
 `copilot` choice on the manual dry-run dispatch and the scheduled
-caller's dispatch. Scheduled runs stay on the Claude engine, and
-the scheduled caller marks this engine for dry-run evaluation
-alone until the enforcement below lands.
+caller's dispatch. Scheduled runs stay on the Claude engine. The
+scheduled caller forces dry-run for this engine and withholds the
+GitHub App credential from it, so a Copilot session holds no
+write-capable token at all until the enforcement below lands.
 
 Remaining:
 
@@ -948,7 +955,7 @@ Remaining:
    caller job's `copilot-requests: write` grant (§13.3). Blocked
    behind the linting gate, so the PAT route carries the engine
    until then.
-3. **Model choice** — `claude-sonnet-4.6` against
+3. **Model choice** — `claude-sonnet-5` against
    `claude-haiku-4.5` for what is a classification workload;
    measure quality against cost on a real backlog.
 4. **Folder trust** — the CLI asks a session to confirm it

@@ -61,10 +61,20 @@ it never applied shows up as a difference between the two snapshots.
 
 ## Safety model in brief
 
-Dry-run is the default: consumers opt in to live labelling. The agent
-receives read verbs of `gh` plus, in live mode, a constrained wrapper
-that validates repository, issue number, and label existence before a
-fixed `--add-label` operation. Model credentials never carry
-repository write, which leaves the GitHub App token as the sole route
-to a label. Issue text counts as data, never instructions, and
-containment limits the worst case to a wrong label.
+Dry-run is the default: consumers opt in to live labelling. The
+agent receives read verbs of `gh` plus, in live mode, a
+constrained wrapper that validates repository, issue number, and
+label existence before a fixed `--add-label` operation. Every
+label write travels over the GitHub App token, which stays
+separate from the model credential; the Anthropic and Gemini keys
+carry no GitHub permissions at all. Issue text counts as data,
+never instructions.
+
+Containment differs by engine, so the worst case does too. The
+Claude and Gemini engines hold the agent to a tool allow-list the
+harness enforces, and a mislabelled issue is the ceiling. The
+Copilot engine's allow-list is an approval policy rather than a
+filter, and one of its routes reuses the calling job's
+`GITHUB_TOKEN`, so treat that engine as one for evaluation rather
+than production until the enforcement in
+[Design §13.4](development/DESIGN.md) lands.

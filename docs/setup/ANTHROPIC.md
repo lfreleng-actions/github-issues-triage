@@ -63,7 +63,7 @@ described in [README.md](README.md).
 ```yaml
 with:
   engine: 'claude'
-  model: 'claude-sonnet-4.6'
+  model: 'claude-sonnet-5'
 ```
 
 ## 4. Verify
@@ -74,10 +74,18 @@ gh workflow run testing.yaml -f engine=claude
 
 ## Egress
 
-Sessions reach `api.anthropic.com:443`. Runs with
-`egress_policy: block` need that endpoint in the allow-list
-loaded by `harden-runner-block-action`; audit mode records it
-without blocking.
+A session reaches `api.anthropic.com:443`. The harness reaches
+more than that before the session starts: the pinned
+`claude-code-action` installs Bun, runs `bun install` for its own
+dependencies, and installs the Claude Code CLI. Each of those
+steps fetches from a distribution host of its own.
+
+Treat the model endpoint as a starting point rather than a
+finished allow-list. The dependable way to build one is a run
+with `egress_policy: audit`, which records every outbound call
+without blocking; harvest what it recorded, then switch to
+`block`. A hand-written list that misses an install-time endpoint
+fails the run before the session reaches Anthropic at all.
 
 ## Failure modes
 
