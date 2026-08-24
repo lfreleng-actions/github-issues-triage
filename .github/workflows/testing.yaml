@@ -48,7 +48,10 @@ jobs:
       contents: read  # Asset checkout and metadata reads
     uses: ./.github/workflows/issues-triage.yaml
     with:
-      org: 'lfreleng-actions'
+      # The owner running the test, so a fork exercises its own
+      # organisation rather than reaching into the upstream one.
+      # Evaluates to lfreleng-actions upstream.
+      org: "${{ github.repository_owner }}"
       dry_run: true
       # Skip the agent: PR runs are secretless (see header comment).
       skip_agent: true
@@ -65,7 +68,9 @@ jobs:
       contents: read  # Asset checkout and metadata reads
     uses: ./.github/workflows/issues-triage.yaml
     with:
-      org: 'lfreleng-actions'
+      # See the plumbing job: the caller's own owner, so fork runs
+      # stay inside the fork.
+      org: "${{ github.repository_owner }}"
       # Read-only: report proposed labels, apply nothing.
       dry_run: true
       # Re-examine labelled issues so the agent session always runs

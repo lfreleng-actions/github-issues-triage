@@ -4,7 +4,7 @@
 
 # Scheduled thin caller for the reusable issues-triage workflow in
 # this repository: 07:00 UTC every weekday, scanning the whole
-# lfreleng-actions organisation.
+# organisation this repository belongs to.
 #
 # Scheduled runs stay in dry-run until the rollout completes (see
 # docs/development/DESIGN.md section 11); a manual dispatch can go
@@ -66,7 +66,10 @@ jobs:
       contents: read  # Asset checkout and repository metadata reads
     uses: ./.github/workflows/issues-triage.yaml
     with:
-      org: 'lfreleng-actions'
+      # The owner this workflow runs under, which upstream is
+      # lfreleng-actions. Naming it this way rather than hard-coding
+      # it keeps a fork's scheduled runs inside the fork.
+      org: "${{ github.repository_owner }}"
       # Scheduled runs hold the Claude engine; a manual dispatch
       # takes the operator's choice. The fallback covers schedule
       # events, which carry no inputs, and API dispatches that
