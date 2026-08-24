@@ -35,7 +35,9 @@ on:
         required: true
         type: string
       engine:
-        description: 'Agent engine: claude, gemini, or copilot'
+        description: >-
+          Agent engine: claude, gemini, or copilot. The copilot
+          engine never applies labels; a live run on it fails fast.
         type: string
         default: 'claude'
       model:
@@ -189,6 +191,7 @@ jobs:
         env:
           ENGINE: "${{ inputs.engine }}"
           MODEL: "${{ inputs.model }}"
+          DRY_RUN: "${{ inputs.dry_run }}"
           SKIP_AGENT: "${{ inputs.skip_agent }}"
           ANTHROPIC_KEY: "${{ secrets.anthropic_api_key }}"
           GEMINI_KEY: "${{ secrets.gemini_api_key }}"
@@ -209,6 +212,22 @@ jobs:
               default_model='claude-sonnet-5'
               key="$COPILOT_KEY"
               key_name='copilot_token'
+              # This engine's tool containment is an approval policy
+              # the CLI auto-approves around, not a filter (see
+              # DESIGN.md section 13.2), so it never applies labels.
+              # The label wrapper is out of its reach in any case:
+              # the CLI approves shell commands on their first-level
+              # stem, and granting that for the wrapper would mean
+              # granting bare 'bash'. Refuse the combination here
+              # rather than let a live session discover it.
+              if [ "$SKIP_AGENT" != "true" ] &&
+                [ "$DRY_RUN" != "true" ]
+              then
+                echo "::error::The copilot engine cannot apply" \
+                  "labels; set dry_run, or choose claude or" \
+                  "gemini for a live run."
+                exit 1
+              fi
               ;;
             *)
               echo "::error::Unknown engine '$ENGINE'; use claude," \
@@ -377,33 +396,34 @@ jobs:
               }
             }')
           echo "gemini_settings=$settings" >> "$GITHUB_OUTPUT"
-          # Copilot CLI grants. Two readings of its shell matching
-          # exist and the documentation supports both: the CLI
-          # reference describes ':*' as "the command stem followed
-          # by a space", while GitHub's own gh-aw compiler
-          # documents the bare form as a prefix match. Emit both
-          # forms of every pattern. Whichever reading holds, one
-          # matches; neither widens the grant, because both anchor
-          # on the same command.
+          # Copilot CLI grants. The CLI approves gh and git commands
+          # on their first-level subcommand alone, so
+          # 'shell(gh label:*)' matches 'gh label list --repo …'
+          # while 'shell(gh label list:*)' matches nothing whatever.
+          # Allow rules therefore name the first level and no more.
+          # Both forms of each pattern go out because the bare form
+          # covers the bare command; neither widens the grant, since
+          # both anchor on the same stem.
           patterns() {
             for cmd in "$@"; do
               printf 'shell(%s),shell(%s:*),' "$cmd" "$cmd"
             done
           }
-          allow_cmds=('gh search issues' 'gh issue list'
-            'gh issue view' 'gh label list')
-          if [ "$DRY_RUN" != "true" ]; then
-            allow_cmds+=(
-              'bash triage-assets/scripts/apply-label.sh')
-          fi
-          allow="$(patterns "${allow_cmds[@]}")"
+          allow="$(patterns 'gh search' 'gh issue' 'gh label')"
           echo "copilot_allow=${allow%,}" >> "$GITHUB_OUTPUT"
-          # Deny rules outrank every allow rule and any approval the
-          # CLI would otherwise infer, so they restate the
-          # containment the allow-list already implies: the wrapper
-          # applies labels, never the agent through gh issue edit.
-          deny_cmds=('git' 'gh pr' 'gh issue edit' 'gh issue close'
-            'gh issue comment')
+          # Deny rules match the whole command rather than the first
+          # level, and outrank every allow rule and any approval the
+          # CLI would otherwise infer. That asymmetry is what keeps
+          # the first-level grants above read-only: the policy needs
+          # list, status, and view, so every mutating verb inside
+          # the allowed groups is named here instead.
+          deny_cmds=('git' 'gh pr'
+            'gh issue close' 'gh issue comment' 'gh issue create'
+            'gh issue delete' 'gh issue develop' 'gh issue edit'
+            'gh issue lock' 'gh issue pin' 'gh issue reopen'
+            'gh issue transfer' 'gh issue unlock' 'gh issue unpin'
+            'gh label clone' 'gh label create' 'gh label delete'
+            'gh label edit')
           deny="write,$(patterns "${deny_cmds[@]}")"
           echo "copilot_deny=${deny%,}" >> "$GITHUB_OUTPUT"
 
@@ -536,6 +556,10 @@ jobs:
           # scratch space, so nothing persists in the home directory
           # between steps or influences the session.
           COPILOT_HOME: "${{ runner.temp }}/copilot"
+          # Where the agent's own gh commands find their credential.
+          # Outside the workspace, so the artefact upload never
+          # collects it.
+          GH_CONFIG_DIR: "${{ runner.temp }}/gh-config"
           MODEL: "${{ steps.model.outputs.model }}"
           ALLOW_TOOLS: "${{ steps.prompt.outputs.copilot_allow }}"
           DENY_TOOLS: "${{ steps.prompt.outputs.copilot_deny }}"
@@ -544,11 +568,34 @@ jobs:
           # all'), unlike --allow-tool, which pre-approves commands
           # but leaves read-only shell auto-approved. This drops
           # file writes, patching, web_fetch, skills, and subagents
-          # out of reach entirely.
+          # out of reach entirely. The four names below are the
+          # shell tools the CLI actually registers: one to run a
+          # command, three to manage backgrounded ones.
           AVAILABLE_TOOLS: >-
-            bash,list_bash,read_bash,stop_bash,write_bash
+            bash,list_bash,read_bash,stop_bash
         run: |
           mkdir -p artefacts/copilot-logs
+          # Authenticate the agent's gh through a configuration file
+          # rather than its environment. --secret-env-vars strips
+          # the variables it names from every shell the agent runs,
+          # not merely from the output, so a GH_TOKEN named there
+          # would leave every gh command in the session
+          # unauthenticated. Seeding the config keeps gh working
+          # while the credential stays out of the agent's
+          # environment altogether, and value-based redaction still
+          # covers it because this step's own process keeps
+          # GH_TOKEN set. Writing hosts.yml directly rather than
+          # running 'gh auth login --with-token' avoids that
+          # command's validating API call, which a GitHub App
+          # installation token cannot make.
+          hosts="$GH_CONFIG_DIR/hosts.yml"
+          mkdir -p "$GH_CONFIG_DIR"
+          (
+            umask 077
+            printf 'github.com:\n    oauth_token: %s\n' "$GH_TOKEN" \
+              > "$hosts"
+            printf '    git_protocol: https\n' >> "$hosts"
+          )
           prompt="$(cat artefacts/prompt.md)"
           # --disable-builtin-mcps removes the bundled GitHub MCP
           #   server, whose label_write tool would otherwise offer a

@@ -83,8 +83,9 @@ checkout defaults to the called workflow's own commit.
 
 > [!WARNING]
 > The Copilot engine holds a weaker containment boundary than the
-> other two — see the safety model below and design doc §13.2. Use
-> it for evaluation, not for live or scheduled triage.
+> other two — see the safety model below and design doc §13.2. It
+> never applies labels: pairing it with `dry_run: false` fails
+> the run before the session starts.
 
 The `copilot` engine needs no model API key. Grant the calling
 job `copilot-requests: write` and hand its `GITHUB_TOKEN` to the
@@ -149,7 +150,7 @@ mint time.
 | Input | Default | Purpose |
 | ----- | ------- | ------- |
 | `org` | (required) | GitHub organisation or user to triage |
-| `engine` | `claude` | Agent engine: `claude`, `gemini`, or `copilot` |
+| `engine` | `claude` | Agent engine: `claude`, `gemini`, or `copilot` (refuses live runs) |
 | `model` | engine default | `claude-opus-5` / `gemini-3.5-flash-lite` / `claude-sonnet-5` |
 | `dry_run` | `true` | Report intended labels; apply nothing |
 | `retriage` | `false` | Re-examine issues that carry labels |
@@ -194,15 +195,17 @@ mint time.
   issue number, and label existence before a fixed `--add-label`
   operation — no `gh issue edit`, no `git`, no arbitrary shell
 - **Copilot engine caveat**: that engine restricts the model to
-  shell tools, denies the mutating `gh` and `git` verbs, and turns
-  off built-in MCP servers and custom-instruction loading. Its
-  allow-list is an approval policy rather than a filter, though,
-  and the CLI keeps auto-approving shell commands it treats as
-  reads. Those commands see both credentials in their environment,
-  and redaction works by value, so a command that encodes a token
-  defeats it. Writes stay shut, but treat this engine as opt-in
-  and unsuited to live or scheduled runs until the enforcement in
-  design doc §13.4 lands
+  shell tools, denies the mutating `gh` and `git` verbs, turns
+  off built-in MCP servers and custom-instruction loading, and
+  keeps both credentials out of the agent's environment by
+  seeding a `gh` configuration directory instead. Its allow-list
+  is an approval policy rather than a filter, though, and the CLI
+  keeps auto-approving shell commands it treats as reads. Such a
+  command can still reach that configuration file, where
+  value-based redaction alone protects the token — and a command
+  that encodes the value defeats redaction. Writes stay shut, and
+  the workflow refuses live runs on this engine until the
+  enforcement in design doc §13.4 lands
 - **Token scope**: App tokens carry `issues: write` and
   `metadata: read`, down-scoped at mint time, expiring in an hour.
   The model credential is never the App token: the Anthropic and

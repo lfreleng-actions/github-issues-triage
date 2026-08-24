@@ -14,9 +14,10 @@ this engine adds no third vendor relationship.
 > This engine holds a weaker containment boundary than the other
 > two. Its tool allow-list is an approval policy rather than a
 > filter, and the CLI keeps auto-approving shell commands it
-> treats as reads. Treat it as opt-in for evaluation, not as an
-> engine for live or scheduled triage, until the command-level
-> enforcement in section 13.4 of
+> treats as reads. The reusable workflow **refuses a live run on
+> this engine**: pair it with `dry_run: true` or the run fails
+> fast. That stands until the command-level enforcement in
+> section 13.4 of
 > [`../development/DESIGN.md`](../development/DESIGN.md) lands.
 
 <!-- markdownlint-disable MD013 -->
@@ -28,6 +29,7 @@ this engine adds no third vendor relationship.
 | Default model | `claude-sonnet-5` |
 | Harness | `@github/copilot` CLI, pinned, installed with npm |
 | Turn ceiling | None — `max_turns` has no analogue; the 20-minute step timeout bounds the session |
+| Label writes | Refused; the engine never applies labels |
 
 <!-- markdownlint-enable MD013 -->
 
@@ -149,6 +151,11 @@ organisation's billing dashboard while the engine is new.
    access is the point of the split.
 4. Set the shortest expiry you can live with, and copy the value.
 
+The token has to be fine-grained. The CLI inspects the value and
+refuses a classic PAT outright, whatever scopes it carries:
+`The COPILOT_GITHUB_TOKEN environment variable contains a classic
+PAT.`
+
 The token's owner must hold an active Copilot seat or
 subscription: requests draw on that person's entitlement, and
 their licence decides which models the session can reach.
@@ -210,9 +217,13 @@ fails the run before the session starts.
 | Symptom | Cause | Fix |
 | ------- | ----- | --- |
 | `Agent runs with engine 'copilot' need the copilot_token secret` | No secret reached the workflow | Add the secret, or pass the caller's token through |
+| `The copilot engine cannot apply labels` | The run set `dry_run: false` | Set `dry_run: true`, or choose `claude` or `gemini` |
 | CLI rejects the token on route A | The organisation policy is off, or the grant did not survive the hand-off | Enable the policy; otherwise fall back to route B |
 | CLI rejects the token on route B | The PAT lacks Copilot Requests, has expired, or its owner holds no Copilot seat | Reissue the PAT, or assign its owner a seat |
+| `COPILOT_GITHUB_TOKEN … contains a classic PAT` | A classic PAT reached the CLI, which refuses them regardless of scope | Issue a fine-grained PAT instead |
 | Session stalls until the step timeout | The CLI waited on an interactive prompt | Capture the run's artefact bundle and report it |
+| Every agent command reports `Permission denied and could not request permission from user` | The tool grants no longer match what the CLI expects | Compare against section 13.2 of [`../development/DESIGN.md`](../development/DESIGN.md); the CLI approves `gh` on its first-level subcommand |
+| Agent `gh` commands report missing authentication | The seeded `gh` configuration directory did not reach the session | Check the `GH_CONFIG_DIR` set-up in the agent step |
 
 <!-- markdownlint-enable MD013 -->
 

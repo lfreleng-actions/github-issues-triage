@@ -74,9 +74,10 @@ jobs:
       engine: ${{ inputs.engine || 'claude' }}
       # Scheduled runs are always dry-run during rollout; manual
       # dispatch runs take the operator's choice, except on the
-      # copilot engine. That engine's containment gap (DESIGN.md
-      # section 13.2) rules out live label writes, so the caller
-      # forces dry-run rather than trusting the input description.
+      # copilot engine. The reusable workflow refuses a live run on
+      # that engine outright (DESIGN.md section 13.2); forcing the
+      # input here turns what would be a failed run into a working
+      # dry-run one.
       dry_run: >-
         ${{ github.event_name == 'schedule' || inputs.dry_run ||
         inputs.engine == 'copilot' }}

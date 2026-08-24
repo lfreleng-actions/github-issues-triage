@@ -718,9 +718,10 @@ Remaining:
 
 ## 13. Third Engine: GitHub Copilot
 
-**Status:** Implemented and opt-in. Not fit for live or scheduled
-runs until the command-level enforcement in §13.4 lands — see the
-containment note in §13.2 for what that gap costs.
+**Status:** Implemented and opt-in. The reusable workflow refuses
+a live run on this engine, so it never applies labels, and that
+stands until the command-level enforcement in §13.4 lands — see
+the containment note in §13.2 for what that gap costs.
 
 The organisation already pays for Copilot. A Copilot engine turns
 triage spend into an existing entitlement rather than a third
@@ -774,6 +775,7 @@ Actions documentation shows for direct use.
 | Prompt | `prompt` input | `prompt` input | `--prompt`, read from `artefacts/prompt.md` |
 | Model | `--model` via `claude_args` | `gemini_model` input | `--model` |
 | Tool containment | `--allowedTools` grant list | `settings` JSON: `tools.core` | `--available-tools` and `--deny-tool` (enforced), `--allow-tool` (approval) |
+| Repository credential | `GH_TOKEN` in the agent's environment | `GH_TOKEN` in the agent's environment | seeded `gh` config dir; absent from the agent's environment |
 | Turn ceiling | `--max-turns` | `model.maxSessionTurns` | none — the step timeout bounds it |
 | Session evidence | `execution_file` output | telemetry log plus summary output | `--log-dir` plus `--share` transcript |
 
@@ -784,54 +786,88 @@ Containment notes specific to this engine:
 - **Approval versus enforcement.** `--allow-tool` is not the
   allow-list `--allowedTools` is on the Claude side. The CLI
   auto-approves shell commands it classifies as reads, so naming
-  four `gh` commands pre-approves those without denying others.
+  the `gh` groups pre-approves those without denying others.
   The engine layers three mechanisms in response:
   `--available-tools` restricts the model to the shell tools and
   nothing else, which the CLI enforces outright ("the model won't
   be able to use it at all"); `--deny-tool` blocks the mutating
   `gh` and `git` verbs, and outranks every allow rule and any
   approval the CLI would otherwise infer; `--allow-tool`
-  pre-approves the four commands the policy needs.
+  pre-approves the groups the policy needs.
 
   What survives that stack is **other commands the CLI treats as
-  reads**, which it auto-approves and no flag withdraws. That
-  matters more than "wider reads": the agent's shell carries both
-  credentials in its environment, and `--secret-env-vars` redacts
-  by *value*, so a command that transforms a token (encoding it,
-  say) defeats the redaction and can land it in the step log and
-  the 90-day evidence bundle. The App token's one-hour lifetime
-  bounds the damage, not the exposure.
+  reads**, which it auto-approves and no flag withdraws. A run
+  confirmed the gap concretely: with no allow rule at all, `ls`
+  and `cat` both ran, and `cat` returned a file's contents. (The
+  same run showed `gh` sitting outside that classifier — the CLI
+  refused an unapproved `gh label list` — so the gap covers
+  ordinary shell reads, not the policy's own commands.)
+
+  That matters more than "wider reads". The engine now keeps
+  both credentials out of the agent's environment entirely (see
+  the redaction note below), which removes the easiest route to
+  a token; what remains is that an auto-approved read can still
+  reach the `gh` configuration file, and value-based redaction
+  alone stands between that and the 90-day evidence bundle.
+  A command that transforms the value — encoding it, say —
+  defeats redaction. The App token's one-hour lifetime bounds
+  the damage, not the exposure.
 
   Writes remain shut regardless — the wrapper, the deny rules,
   and the token scope each enforce that independently — but this
   is a materially weaker boundary than the other two engines
   offer, and prompt-injected issue text is the threat it fails
   against. Closing it needs a `preToolUse` hook vetting each
-  command against the policy's four (§13.4). Until that lands,
-  treat the engine as opt-in and unsuited to live or scheduled
-  runs.
-- **Shell pattern matching.** The CLI reference describes the
-  `:*` suffix as "the command stem followed by a space", while
-  GitHub's own `gh-aw` compiler documents the bare form as a
-  prefix match (`shell(jq)` matching `jq '.filter' …`). The two
-  readings disagree about whether `shell(gh issue list)` covers
-  `gh issue list --owner …`. The engine sidesteps the question by
-  emitting both forms of every pattern: one matches under either
-  reading, and neither widens the grant, since both anchor on the
-  same command. The deny list carries both forms for the same
-  reason — a deny rule that fails to match protects nothing.
+  command against the policy's own (§13.4). Until that lands,
+  the engine is opt-in, and the reusable workflow refuses live
+  runs on it outright.
+- **Shell pattern matching.** The CLI approves `gh` and `git`
+  commands on their **first-level subcommand** alone. A run
+  confirmed it: `shell(gh label:*)` matches
+  `gh label list --repo …`, while `shell(gh label list:*)` matches
+  nothing at all — the CLI refuses the command outright, and in
+  `-p` mode a refused command cannot ask for approval. The same
+  run showed **deny** rules matching at full-command granularity:
+  `shell(gh issue edit:*)` blocks `gh issue edit …` even while
+  `shell(gh issue:*)` allows the group.
+
+  That asymmetry shapes the grant. Allow rules name the three
+  first-level groups the policy needs — `gh search`, `gh issue`,
+  `gh label` — and deny rules pare each group back to its read
+  verbs by naming every mutating one (`gh issue edit`,
+  `gh issue close`, `gh label create`, and the rest). The engine
+  still emits the bare and `:*` forms of each pattern, since the
+  bare form covers a bare command and neither widens the grant.
 - **Deny rules.** They outrank every allow rule and any approval
   the CLI would otherwise infer, so the engine restates the
-  boundary explicitly: no `write`, no `git`, no `gh issue edit`.
-  Every label still travels through the wrapper.
-- **Token redaction.** The CLI redacts `GITHUB_TOKEN` and
-  `COPILOT_GITHUB_TOKEN` from its output by default, but not
-  `GH_TOKEN` — which here holds the App token carrying
-  `issues: write`. Since this engine writes CLI logs and a
-  session transcript into an artefact kept for 90 days,
-  `--secret-env-vars` registers `GH_TOKEN` explicitly. The other
-  two engines emit no comparable transcript of the shell
-  environment.
+  boundary explicitly: no `write`, no `git`, no mutating `gh`
+  verb. Every label still travels through the wrapper.
+- **Token redaction, and the credential the agent never sees.**
+  `--secret-env-vars` does two jobs, and the second one bites:
+  it redacts the named variables' values from output **and**
+  strips those variables from the environment of every shell the
+  agent runs. A run confirmed the strip — a variable named there
+  reads back unset inside an agent command, and the same variable
+  reads back set when the flag omits it.
+
+  So the flag cannot cover `GH_TOKEN`, which is where the
+  repository credential lives: the agent's own `gh` commands
+  would lose their authentication. The engine instead seeds a
+  scratch `gh` configuration directory (`GH_CONFIG_DIR`, under
+  the runner's temporary space) with the token before starting
+  the session, and leaves `GH_TOKEN` in `--secret-env-vars`. The
+  agent's `gh` works from the configuration file; the credential
+  never appears in the agent's environment at all; and
+  value-based redaction still covers it, because the CLI's own
+  process keeps `GH_TOKEN` set — a run confirmed that a file
+  holding the value comes back redacted when the agent reads it.
+
+  That is a strict improvement on the other two engines here,
+  and it delivers half of the alternative floated in §13.4: no
+  credential sits in the agent's shell environment. It does not
+  close the gap above, because the configuration file is still
+  readable by an auto-approved `cat`; redaction, not absence, is
+  what protects the value at that point.
 - **Built-in MCP servers, disabled.** Copilot CLI ships a GitHub
   MCP server enabled by default, whose `label_write` tool would
   apply labels without passing through `apply-label.sh` — around
@@ -917,28 +953,37 @@ allow/deny translation of the shared tool grants, the pinned CLI
 install, session evidence into the artefact bundle, and the
 `copilot` choice on the manual dry-run dispatch and the scheduled
 caller's dispatch. Scheduled runs stay on the Claude engine. The
-scheduled caller forces dry-run for this engine and withholds the
-GitHub App credential from it, so a Copilot session holds no
-write-capable token at all until the enforcement below lands.
+reusable workflow refuses a live run on this engine, and the
+scheduled caller withholds the GitHub App credential from it as
+well, so a Copilot session holds no write-capable token at all
+until the enforcement below lands.
 
 Remaining:
 
 1. **Precondition for live use** — command-level enforcement: a
    `preToolUse` hook vetting each proposed shell command against
-   the policy's four, closing the auto-approved-reads gap in
+   the policy's own, closing the auto-approved-reads gap in
    §13.2. Needs the hook payload contract confirmed against a
    real session before it goes anywhere near a security boundary.
-   An alternative worth weighing: route `gh` through a
-   token-holding wrapper so no credential sits in the agent's
-   shell environment at all
-2. Cost telemetry: `load_transcript_stats` parses a Claude-shaped
+   Half of the alternative once floated here — keeping the
+   credential out of the agent's shell — has landed as the
+   seeded `gh` configuration directory (§13.2); the remaining
+   half is vetting the commands themselves
+2. **Second precondition for live use** — a route to the label
+   wrapper. The CLI approves shell commands on their first-level
+   stem, so `shell(bash triage-assets/scripts/apply-label.sh:*)`
+   matches nothing, and the workable grant would be bare `bash`.
+   A run confirmed the fix: install the wrapper as an executable
+   on `PATH` under its own name, which `shell(<name>:*)` then
+   grants and nothing more
+3. Cost telemetry: `load_transcript_stats` parses a Claude-shaped
    execution log; map the Copilot CLI's log fields so the report
    carries turns and spend for this engine too (defensive parsing
    means unmapped fields drop out rather than break the report)
-3. Confirm the organisation billing policy, then move this
+4. Confirm the organisation billing policy, then move this
    repository's callers from the PAT to the caller `GITHUB_TOKEN`
    once the linting toolchain recognises `copilot-requests`
-4. Egress: an audit-mode Copilot run to harvest endpoints
+5. Egress: an audit-mode Copilot run to harvest endpoints
    (`api.githubcopilot.com:443` and `registry.npmjs.org:443`
    expected, plus the Node distribution host used by
    `setup-node`) for the org allow-list, as §7.1 did for
@@ -946,27 +991,24 @@ Remaining:
 
 ### 13.5 Open questions (Copilot track)
 
-1. **Shell pattern matching** — confirm in a real run which of
-   the two documented readings the CLI implements for multi-word
-   `gh` subcommands. The engine emits both forms, so a session
-   should work either way; the run settles which form to keep.
-2. **The caller `GITHUB_TOKEN` route** — confirm that a token
+1. **The caller `GITHUB_TOKEN` route** — confirm that a token
    passed in as a named secret reaches the CLI carrying the
    caller job's `copilot-requests: write` grant (§13.3). Blocked
    behind the linting gate, so the PAT route carries the engine
    until then.
-3. **Model choice** — `claude-sonnet-5` against
+2. **Model choice** — `claude-sonnet-5` against
    `claude-haiku-4.5` for what is a classification workload;
    measure quality against cost on a real backlog.
-4. **Folder trust** — the CLI asks a session to confirm it
-   trusts its working directory, and `--no-ask-user` disables the
-   agent's `ask_user` tool rather than that startup prompt. A
-   runner's config directory starts empty every run, so the
-   question applies to GitHub's own documented Actions example
-   too, which is the evidence that `-p` mode skips the prompt.
-   Confirm on the first real run; the failure mode is a stalled
-   session that the step timeout ends.
-5. **Premium-request accounting** — whether per-request billing
+3. **Premium-request accounting** — whether per-request billing
    makes retriage runs materially more expensive here than on the
    metered API engines, and where the analogue of a per-workspace
    spend cap lives (cost centres, per §13.3).
+
+Settled by rehearsal runs against CLI 1.0.80:
+
+- **Shell pattern matching** — approval happens on the
+  first-level subcommand; denial matches the whole command. See
+  §13.2.
+- **Folder trust** — `-p` mode starts without asking, on an
+  empty `COPILOT_HOME` and an untrusted working directory alike.
+  No stall.

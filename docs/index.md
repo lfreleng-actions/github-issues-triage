@@ -75,6 +75,6 @@ Claude and Gemini engines hold the agent to a tool allow-list the
 harness enforces, and a mislabelled issue is the ceiling. The
 Copilot engine's allow-list is an approval policy rather than a
 filter, and one of its routes reuses the calling job's
-`GITHUB_TOKEN`, so treat that engine as one for evaluation rather
-than production until the enforcement in
+`GITHUB_TOKEN`, so the workflow refuses a live run on that engine
+until the enforcement in
 [Design §13.4](development/DESIGN.md) lands.
