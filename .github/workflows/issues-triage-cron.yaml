@@ -15,9 +15,10 @@
 #
 # Scheduled runs always take the claude engine. A manual dispatch
 # picks any of the three; per-engine credentials and their setup
-# live in docs/setup/. The copilot engine is forced to dry-run and
-# runs without App credentials whatever the operator picks, so it
-# never holds a write-capable token (DESIGN.md section 13.2).
+# live in docs/setup/. The reusable workflow refuses live runs on
+# the copilot engine and withholds App credentials from it, so
+# that engine never holds a write-capable token (DESIGN.md
+# section 13.4).
 name: 'Issues Triage ⏰'
 
 # yamllint disable-line rule:truthy
@@ -89,18 +90,10 @@ jobs:
       egress_policy: 'audit'
       # The App variables live at org level; when unset the
       # reusable falls back to github.token (single-repo scope),
-      # which suits dry-run rollout.
-      #
-      # The copilot engine gets no App credential at all. Forcing
-      # dry-run stops the label wrapper, but the App token would
-      # still sit in that engine's shell environment as GH_TOKEN
-      # carrying issues:write, and its containment gap (DESIGN.md
-      # section 13.2) leaves auto-approved shell commands able to
-      # read it. Withholding the client id means no token gets
-      # minted, so the session falls back to github.token.
-      github_app_client_id: >-
-        ${{ inputs.engine != 'copilot' &&
-        vars.LF_RELENG_BOT_CLIENT_ID || '' }}
+      # which suits dry-run rollout. The reusable withholds the App
+      # token from the copilot engine itself (DESIGN.md section
+      # 13.4), so this passes the client id unconditionally.
+      github_app_client_id: ${{ vars.LF_RELENG_BOT_CLIENT_ID || '' }}
       # Run the pipeline with the assets from the triggering commit.
       assets_repository: ${{ github.repository }}
       assets_ref: ${{ github.sha }}

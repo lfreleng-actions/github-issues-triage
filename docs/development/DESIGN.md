@@ -818,9 +818,9 @@ Containment notes specific to this engine:
   is a materially weaker boundary than the other two engines
   offer, and prompt-injected issue text is the threat it fails
   against. Closing it needs a `preToolUse` hook vetting each
-  command against the policy's own (§13.4). Until that lands,
-  the engine is opt-in, and the reusable workflow refuses live
-  runs on it outright.
+  command against the commands the policy names (§13.4). Until
+  that lands, the engine is opt-in, and the reusable workflow
+  refuses live runs on it outright.
 - **Shell pattern matching.** The CLI approves `gh` and `git`
   commands on their **first-level subcommand** alone. A run
   confirmed it: `shell(gh label:*)` matches
@@ -833,15 +833,45 @@ Containment notes specific to this engine:
 
   That asymmetry shapes the grant. Allow rules name the three
   first-level groups the policy needs — `gh search`, `gh issue`,
-  `gh label` — and deny rules pare each group back to its read
-  verbs by naming every mutating one (`gh issue edit`,
-  `gh issue close`, `gh label create`, and the rest). The engine
-  still emits the bare and `:*` forms of each pattern, since the
-  bare form covers a bare command and neither widens the grant.
-- **Deny rules.** They outrank every allow rule and any approval
-  the CLI would otherwise infer, so the engine restates the
-  boundary explicitly: no `write`, no `git`, no mutating `gh`
-  verb. Every label still travels through the wrapper.
+  `gh label` — and deny rules pare each group back to the verbs
+  the policy actually uses. Mutating verbs go without saying
+  (`gh issue edit`, `gh label create`). The non-issue searches
+  are easier to miss: `gh search` covers `code`, `commits`,
+  `prs` and `repos`, and `gh search code` would put repository
+  content in front of the model and into a 90-day artefact. The
+  engine still emits the bare and `:*` forms of each pattern,
+  since the bare form covers a bare command and neither widens
+  the grant.
+- **Deny rules, and what they are worth.** They outrank every
+  allow rule and any approval the CLI would otherwise infer, and
+  they match further down the command than allow rules do. That
+  makes them useful, and invites reading them as a
+  command-level boundary. They are not one. Matching keys on the
+  leading words of the command, and two valid `gh` spellings walk
+  past it — both confirmed by run, against the production deny
+  list:
+
+  <!-- markdownlint-disable MD013 -->
+
+  | Command | Why it slips through |
+  | ------- | -------------------- |
+  | `gh issue new …` | `new` is an alias of `issue create`; the rule names `gh issue create` |
+  | `gh issue -R o/r edit 1 …` | `-R` is a persistent flag on `gh issue`, so the command no longer begins `gh issue edit` |
+
+  <!-- markdownlint-enable MD013 -->
+
+  The alias is now named in the list, but flag placement defeats
+  **every** entry and no amount of enumeration fixes it: the
+  agent may put any persistent flag ahead of any subcommand.
+
+  So the deny list is defence in depth, and the real enforcement
+  sits elsewhere: this engine runs with an `issues: read` App
+  token and the workflow refuses live runs, so a bypassed rule
+  reaches an API that rejects the write. That layering is why the
+  gap costs nothing today — and why §13.4's command-vetting hook
+  is a hard precondition for ever pairing this engine with a
+  write-capable token, rather than an improvement to schedule
+  later.
 - **Token redaction, and the credential the agent never sees.**
   `--secret-env-vars` does two jobs, and the second one bites:
   it redacts the named variables' values from output **and**
@@ -953,22 +983,25 @@ allow/deny translation of the shared tool grants, the pinned CLI
 install, session evidence into the artefact bundle, and the
 `copilot` choice on the manual dry-run dispatch and the scheduled
 caller's dispatch. Scheduled runs stay on the Claude engine. The
-reusable workflow refuses a live run on this engine, and the
-scheduled caller withholds the GitHub App credential from it as
-well, so a Copilot session holds no write-capable token at all
-until the enforcement below lands.
+reusable workflow refuses a live run on this engine, and skips
+the App-token mint for it whatever the caller passes, so a
+Copilot session holds no write-capable token at all until the
+enforcement below lands. Both guards live in the reusable
+workflow rather than the caller, so every consumer inherits
+them.
 
 Remaining:
 
 1. **Precondition for live use** — command-level enforcement: a
    `preToolUse` hook vetting each proposed shell command against
-   the policy's own, closing the auto-approved-reads gap in
-   §13.2. Needs the hook payload contract confirmed against a
-   real session before it goes anywhere near a security boundary.
-   Half of the alternative once floated here — keeping the
-   credential out of the agent's shell — has landed as the
-   seeded `gh` configuration directory (§13.2); the remaining
-   half is vetting the commands themselves
+   the commands the policy names. It closes two gaps in §13.2,
+   not one: the auto-approved reads, and the deny rules that
+   flag placement walks past. Needs the hook payload contract
+   confirmed against a real session before it goes anywhere near
+   a security boundary. Half of the alternative once floated
+   here — keeping the credential out of the agent's shell — has
+   landed as the seeded `gh` configuration directory (§13.2); the
+   remaining half is vetting the commands themselves
 2. **Second precondition for live use** — a route to the label
    wrapper. The CLI approves shell commands on their first-level
    stem, so `shell(bash triage-assets/scripts/apply-label.sh:*)`

@@ -141,7 +141,9 @@ work with the caller's `github.token` (`issues: read`), and live
 runs refuse to start. Applying labels needs an App installed
 across the target with `issues: write` and `metadata: read`;
 single-repository runs scope the App token to that repository at
-mint time.
+mint time. The `copilot` engine takes the same App token at
+`issues: read`, which keeps its scan organisation-wide while
+leaving it unable to label.
 
 ### Inputs
 
@@ -206,9 +208,11 @@ mint time.
   that encodes the value defeats redaction. Writes stay shut, and
   the workflow refuses live runs on this engine until the
   enforcement in design doc §13.4 lands
-- **Token scope**: App tokens carry `issues: write` and
-  `metadata: read`, down-scoped at mint time, expiring in an hour.
-  The model credential is never the App token: the Anthropic and
+- **Token scope**: App tokens carry `metadata: read` plus
+  `issues: write`, or `issues: read` on the `copilot` engine,
+  which cannot label. Down-scoped at mint time, expiring in an
+  hour. The model credential is never the App token: the
+  Anthropic and
   Gemini keys carry no GitHub permissions at all, and a Copilot
   PAT scoped to Copilot Requests reaches nothing but the model.
   The Copilot route that reuses a caller `GITHUB_TOKEN` carries
