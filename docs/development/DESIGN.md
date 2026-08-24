@@ -803,15 +803,22 @@ Containment notes specific to this engine:
   refused an unapproved `gh label list` — so the gap covers
   ordinary shell reads, not the policy's own commands.)
 
-  That matters more than "wider reads". The engine now keeps
-  both credentials out of the agent's environment entirely (see
-  the redaction note below), which removes the easiest route to
-  a token; what remains is that an auto-approved read can still
-  reach the `gh` configuration file, and value-based redaction
-  alone stands between that and the 90-day evidence bundle.
-  A command that transforms the value — encoding it, say —
-  defeats redaction. The App token's one-hour lifetime bounds
-  the damage, not the exposure.
+  That matters more than "wider reads". The engine keeps both
+  credentials out of the agent's *own* environment (see the
+  redaction note below), which removes the easiest route to a
+  token — a bare `$GH_TOKEN` expansion. It does not remove the
+  general one. Shell commands run unsandboxed by default, as the
+  same user as the CLI, so an auto-approved read reaches the
+  parent process's environment: a run confirmed `ps eww -p $PPID`
+  running without any allow rule and returning the CLI's full
+  environment. Registered values come back masked, so the
+  remaining step is a transformation — encoding the value —
+  which redaction cannot follow.
+
+  Two conclusions follow. Withholding a credential from the
+  agent's shell is worth doing and is not a boundary. And the
+  90-day evidence bundle holds whatever the session could reach,
+  rather than whatever the run granted it.
 
   Writes remain shut regardless — the wrapper, the deny rules,
   and the token scope each enforce that independently — but this
@@ -892,12 +899,15 @@ Containment notes specific to this engine:
   process keeps `GH_TOKEN` set — a run confirmed that a file
   holding the value comes back redacted when the agent reads it.
 
-  That is a strict improvement on the other two engines here,
-  and it delivers half of the alternative floated in §13.4: no
-  credential sits in the agent's shell environment. It does not
-  close the gap above, because the configuration file is still
-  readable by an auto-approved `cat`; redaction, not absence, is
-  what protects the value at that point.
+  That is an improvement on the other two engines here, and it
+  delivers part of the alternative floated in §13.4: no
+  credential sits in the agent's shell environment. It closes
+  none of the gap above. The configuration file remains readable,
+  and so does the CLI's own environment one process up — shell
+  commands run unsandboxed as the same user, and a run confirmed
+  an unapproved `ps eww -p $PPID` returning it. Redaction, not
+  absence, is what protects the value at that point, and
+  redaction follows values rather than intent.
 - **Built-in MCP servers, disabled.** Copilot CLI ships a GitHub
   MCP server enabled by default, whose `label_write` tool would
   apply labels without passing through `apply-label.sh` — around
@@ -920,26 +930,52 @@ Containment notes specific to this engine:
 
 Copilot CLI reads its credential from `COPILOT_GITHUB_TOKEN`,
 then `GH_TOKEN`, then `GITHUB_TOKEN`. The engine sets the first
-(model access) and the second (the App token, repository access)
-so the two never mix: an App installation token cannot
-authenticate Copilot requests, and the Copilot credential is
-never the App token. What the Copilot credential *can* reach
-depends on the route. A PAT scoped to Copilot Requests reaches
-nothing but the model. A caller `GITHUB_TOKEN` carries whatever
-its job grants, so a caller that grants write hands write to the
-model credential too; the separation keeps the App token out of
-the CLI, it does not by itself bound the caller token.
+(model access) and the second (repository access) so the two
+never mix. What the Copilot credential *can* reach depends on the
+route. A PAT scoped to Copilot Requests reaches nothing but the
+model. A caller `GITHUB_TOKEN` carries whatever its job grants,
+so a caller that grants write hands write to the model credential
+too; separating the two variables keeps the repository credential
+out of the model path, it does not by itself bound the caller
+token.
 
-Two credentials work for the `copilot_token` secret:
+Two credentials work for the `copilot_token` secret today, and a
+third remains a candidate (§13.6):
 
 1. **The calling job's `GITHUB_TOKEN`**, where that job grants
-   `copilot-requests: write`. GitHub's recommended path: no
-   stored secret, a short-lived token per run, and usage metered
-   to the organisation. It depends on the organisation policy
-   "Allow use of Copilot CLI billed to the organization".
+   `copilot-requests: write`. No stored secret, a short-lived
+   token per run, usage metered to the organisation. It depends
+   on the organisation policy "Allow use of Copilot CLI billed to
+   the organization", which GitHub enables by default wherever
+   Copilot CLI is on.
 2. **A fine-grained PAT** carrying the "Copilot Requests"
    permission. Works regardless of that policy, at the cost of a
    long-lived credential attributing spend to one person's seat.
+   The permission sits under **Account permissions**, which
+   GitHub offers when the token's resource owner is the user
+   rather than an organisation. The CLI refuses classic PATs
+   outright, whatever scopes they carry.
+
+The CLI states its own supported list, worth quoting here
+because it bounds what this pipeline may rely on. From
+`copilot login --help` at 1.0.80:
+
+> Supported token types include fine-grained personal access
+> tokens (v2 PATs) with the "Copilot Requests" permission, OAuth
+> tokens from the GitHub Copilot CLI app, and OAuth tokens from
+> the GitHub CLI (gh) app.
+
+App **installation** tokens (`ghs_`) are absent from that list.
+GitHub does document installation tokens making Copilot requests
+— "a service [that] needs to make Copilot requests on behalf of
+an organization without a user's credentials" — but that page
+covers the Copilot **SDK**, whose runtime is not this harness.
+An earlier revision of this document said flatly that an
+installation token *cannot* authenticate Copilot requests; a
+later one said it can and named it the best credential here.
+Both overreached. What holds is narrower: the capability exists
+at the API, the CLI does not document it, and no run has tested
+it. §13.6 tracks it as a candidate rather than a route.
 
 The reusable workflow takes a **secret** rather than declaring
 the permission itself, because a reusable-workflow chain can hold
@@ -953,8 +989,8 @@ the engine.
 This repository's own callers use the PAT for now: neither the
 pinned actionlint (1.7.12.24) nor the SchemaStore workflow schema
 (check-jsonschema 0.38.0) recognises the `copilot-requests`
-scope, so declaring it locally would fail the linting gate.
-Revisit once both learn it.
+scope, so declaring it locally would fail the linting gate. That
+blocks route 1 until both learn the scope.
 
 One caveat on route 1. The secret's value comes from an
 expression the **caller** evaluates, so it carries the caller
@@ -1000,8 +1036,9 @@ Remaining:
    confirmed against a real session before it goes anywhere near
    a security boundary. Half of the alternative once floated
    here — keeping the credential out of the agent's shell — has
-   landed as the seeded `gh` configuration directory (§13.2); the
-   remaining half is vetting the commands themselves
+   landed as the seeded `gh` configuration directory (§13.2),
+   though §13.2 also records why that buys less than it looks
+   like; the remaining half is vetting the commands themselves
 2. **Second precondition for live use** — a route to the label
    wrapper. The CLI approves shell commands on their first-level
    stem, so `shell(bash triage-assets/scripts/apply-label.sh:*)`

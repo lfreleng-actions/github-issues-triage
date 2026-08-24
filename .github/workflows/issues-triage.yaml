@@ -114,12 +114,14 @@ on:
       copilot_token:
         description: >-
           Token authorising Copilot model requests; needed when
-          engine is copilot unless skip_agent is true. Either a
-          fine-grained PAT carrying the 'Copilot Requests'
-          permission, or the calling job's GITHUB_TOKEN where that
-          job grants 'copilot-requests: write' (secretless, billed
-          to the organisation). Deliberately distinct from the App
-          token that performs the labelling — see the agent step.
+          engine is copilot unless skip_agent is true. Either the
+          calling job's GITHUB_TOKEN where that job grants
+          'copilot-requests: write' (secretless, billed to the
+          organisation), or a fine-grained PAT carrying the
+          'Copilot Requests' permission. Classic PATs are refused
+          by the CLI. This is the model credential, always
+          distinct from the repository-access token that reads and
+          labels issues — see docs/setup/GITHUB.md.
         required: false
       github_app_private_key:
         description: 'GitHub App private key (with github_app_client_id)'
@@ -578,12 +580,21 @@ jobs:
         # on a runaway session.
         timeout-minutes: 20
         env:
-          # Two tokens, two jobs. The CLI reads
+          # Two variables, two jobs. The CLI reads
           # COPILOT_GITHUB_TOKEN ahead of GH_TOKEN, so setting both
-          # keeps model access and repository access separate: the
-          # App installation token never reaches the Copilot backend
-          # (which does not accept installation tokens anyway), and
-          # the Copilot token never gains issues:write.
+          # keeps model access and repository access apart: the
+          # repository credential never reaches the Copilot
+          # backend.
+          #
+          # The reverse does not follow. Routing a value into its
+          # own variable says nothing about that value's scope. A
+          # fine-grained PAT carrying Copilot Requests alone
+          # reaches nothing but the model, but a caller passing its
+          # own GITHUB_TOKEN hands over whatever that job granted,
+          # issues:write included. Callers choosing that route keep
+          # the job read-only themselves; this workflow cannot
+          # narrow a secret it receives already evaluated. See
+          # docs/setup/GITHUB.md.
           COPILOT_GITHUB_TOKEN: "${{ secrets.copilot_token }}"
           GH_TOKEN: "${{ steps.app-token.outputs.token || github.token }}"
           TRIAGE_ORG: "${{ inputs.org }}"
@@ -618,13 +629,23 @@ jobs:
           # not merely from the output, so a GH_TOKEN named there
           # would leave every gh command in the session
           # unauthenticated. Seeding the config keeps gh working
-          # while the credential stays out of the agent's
-          # environment altogether, and value-based redaction still
-          # covers it because this step's own process keeps
-          # GH_TOKEN set. Writing hosts.yml directly rather than
-          # running 'gh auth login --with-token' avoids that
-          # command's validating API call, which a GitHub App
-          # installation token cannot make.
+          # while the credential stays out of the agent's own
+          # environment, and value-based redaction still covers it
+          # because this step's own process keeps GH_TOKEN set.
+          #
+          # Worth being precise about what that buys: it removes
+          # the easiest route to the token, not every route. Shell
+          # commands run unsandboxed as this user, so an
+          # auto-approved read reaches this file or the CLI's own
+          # environment one process up. Redaction covers both, and
+          # a transformation defeats redaction. See DESIGN.md
+          # section 13.2; the vetting hook in 13.4 is what closes
+          # it.
+          #
+          # Writing hosts.yml directly rather than running
+          # 'gh auth login --with-token' avoids that command's
+          # validating API call, which a GitHub App installation
+          # token cannot make.
           hosts="$GH_CONFIG_DIR/hosts.yml"
           mkdir -p "$GH_CONFIG_DIR"
           (
