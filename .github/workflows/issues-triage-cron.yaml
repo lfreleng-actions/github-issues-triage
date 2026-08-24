@@ -13,12 +13,18 @@
 # to block with the tagged allow-list loaded by
 # harden-runner-block-action.
 #
-# Scheduled runs always take the claude engine. A manual dispatch
-# picks any of the three; per-engine credentials and their setup
-# live in docs/setup/. The reusable workflow refuses live runs on
-# the copilot engine and withholds App credentials from it, so
-# that engine never holds a write-capable token (DESIGN.md
-# section 13.4).
+# Scheduled runs take the copilot engine: the organisation already
+# pays for Copilot, so triage spend draws on an existing
+# entitlement rather than a third vendor relationship. A manual
+# dispatch picks any of the three; per-engine credentials and
+# their setup live in docs/setup/.
+#
+# The consequence is that scheduled triage reports and never
+# labels: the reusable workflow refuses live runs on this engine,
+# and down-scopes its App token to issues:read, until the
+# command-level enforcement in DESIGN.md section 13.4 lands.
+# Switching this back to 'claude' is the one-line fix if that
+# wait proves too long.
 name: 'Issues Triage ⏰'
 
 # yamllint disable-line rule:truthy
@@ -29,13 +35,13 @@ on:
   workflow_dispatch:
     inputs:
       engine:
-        description: 'Agent engine (copilot forces dry-run, no App)'
+        description: 'Agent engine (copilot cannot apply labels)'
         type: choice
         options:
+          - copilot
           - claude
           - gemini
-          - copilot
-        default: 'claude'
+        default: 'copilot'
       dry_run:
         description: 'Report intended labels; apply nothing'
         type: boolean
@@ -71,11 +77,11 @@ jobs:
       # lfreleng-actions. Naming it this way rather than hard-coding
       # it keeps a fork's scheduled runs inside the fork.
       org: "${{ github.repository_owner }}"
-      # Scheduled runs hold the Claude engine; a manual dispatch
+      # Scheduled runs hold the Copilot engine; a manual dispatch
       # takes the operator's choice. The fallback covers schedule
       # events, which carry no inputs, and API dispatches that
       # omit this one.
-      engine: ${{ inputs.engine || 'claude' }}
+      engine: ${{ inputs.engine || 'copilot' }}
       # Scheduled runs are always dry-run during rollout; manual
       # dispatch runs take the operator's choice, except on the
       # copilot engine. The reusable workflow refuses a live run on
@@ -90,9 +96,10 @@ jobs:
       egress_policy: 'audit'
       # The App variables live at org level; when unset the
       # reusable falls back to github.token (single-repo scope),
-      # which suits dry-run rollout. The reusable withholds the App
-      # token from the copilot engine itself (DESIGN.md section
-      # 13.4), so this passes the client id unconditionally.
+      # which suits dry-run rollout. The reusable down-scopes the
+      # App token to issues:read on the copilot engine (DESIGN.md
+      # section 13.4), so this passes the client id unconditionally
+      # and that engine keeps the org-wide reads the scan needs.
       github_app_client_id: ${{ vars.LF_RELENG_BOT_CLIENT_ID || '' }}
       # Run the pipeline with the assets from the triggering commit.
       assets_repository: ${{ github.repository }}

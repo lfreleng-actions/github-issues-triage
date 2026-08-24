@@ -10,15 +10,19 @@ version and invoked directly — no first-party action exists.
 Authenticates with a GitHub token rather than a model API key, so
 this engine adds no third vendor relationship.
 
-> **⚠️ Not for live or scheduled runs.**
-> This engine holds a weaker containment boundary than the other
-> two. Its tool allow-list is an approval policy rather than a
-> filter, and the CLI keeps auto-approving shell commands it
-> treats as reads. The reusable workflow **refuses a live run on
-> this engine**: pair it with `dry_run: true` or the run fails
-> fast. That stands until the command-level enforcement in
-> section 13.4 of
-> [`../development/DESIGN.md`](../development/DESIGN.md) lands.
+> **⚠️ This engine reports; it never applies labels.**
+> It holds a weaker containment boundary than the other two. Its
+> tool allow-list is an approval policy rather than a filter, and
+> the CLI keeps auto-approving shell commands it treats as reads.
+> The reusable workflow **refuses a live run on this engine**:
+> pair it with `dry_run: true` or the run fails fast, and its App
+> token comes back down-scoped to `issues: read` either way.
+>
+> This repository schedules dry runs on it every weekday, so a
+> scheduled run is a supported configuration. What waits on the
+> command-level enforcement in section 13.4 of
+> [`../development/DESIGN.md`](../development/DESIGN.md) is live
+> labelling, on any trigger.
 
 <!-- markdownlint-disable MD013 -->
 

@@ -689,8 +689,9 @@ steps, the engine-aware key guard and model resolution, Gemini
 `model.maxSessionTurns`, telemetry into the artefact directory),
 session-summary capture,
 and the `engine` choice on the manual dry-run dispatch and the
-scheduled caller's dispatch. Scheduled runs stay on the Claude
-engine until the org validates Gemini output quality.
+scheduled caller's dispatch. Scheduled runs went to the Copilot
+engine instead (§13.6); Gemini stays a dispatch-time choice until
+the org validates its output quality.
 
 Remaining:
 
@@ -1018,11 +1019,14 @@ model default, the tool-surface restriction plus the
 allow/deny translation of the shared tool grants, the pinned CLI
 install, session evidence into the artefact bundle, and the
 `copilot` choice on the manual dry-run dispatch and the scheduled
-caller's dispatch. Scheduled runs stay on the Claude engine. The
-reusable workflow refuses a live run on this engine, and skips
-the App-token mint for it whatever the caller passes, so a
-Copilot session holds no write-capable token at all until the
-enforcement below lands. Both guards live in the reusable
+caller's dispatch. Scheduled runs take the Copilot engine
+(§13.6). The reusable workflow refuses a live run on this
+engine, and down-scopes its App token to `issues: read`, so a
+Copilot session holds no write-capable credential until the
+enforcement below lands. Down-scoped rather than absent, because
+the scan needs the App's org-wide reach: `github.token` is
+repository-scoped, and a Copilot run without an App token would
+see no repository but its own. Both guards live in the reusable
 workflow rather than the caller, so every consumer inherits
 them.
 
@@ -1050,14 +1054,24 @@ Remaining:
    execution log; map the Copilot CLI's log fields so the report
    carries turns and spend for this engine too (defensive parsing
    means unmapped fields drop out rather than break the report)
-4. Confirm the organisation billing policy, then move this
-   repository's callers from the PAT to the caller `GITHUB_TOKEN`
-   once the linting toolchain recognises `copilot-requests`
+4. Replace the fine-grained PAT with a dedicated GitHub App
+   (§13.6). Two questions gate it. First, verify that the CLI
+   accepts an App installation token at all: its documented
+   token list omits them (§13.3), so the whole route may not
+   exist. Second, even if it does,
+   `create-github-app-token` exposes no
+   `permission-copilot-requests` input at any released version
+   or on `main`, so the token needs a hand-rolled mint or an
+   upstream contribution to that action. Neither question
+   touches the App's repository-access tokens
 5. Egress: an audit-mode Copilot run to harvest endpoints
    (`api.githubcopilot.com:443` and `registry.npmjs.org:443`
    expected, plus the Node distribution host used by
    `setup-node`) for the org allow-list, as §7.1 did for
-   Anthropic
+   Anthropic. A first audit run recorded `api.github.com:443`,
+   `github.com:443` and `registry.npmjs.org:443`; the Copilot
+   backend itself has yet to appear, because that run failed
+   authentication before reaching it
 
 ### 13.5 Open questions (Copilot track)
 
@@ -1082,3 +1096,113 @@ Settled by rehearsal runs against CLI 1.0.80:
 - **Folder trust** — `-p` mode starts without asking, on an
   empty `COPILOT_HOME` and an untrusted working directory alike.
   No stall.
+
+### 13.6 The scheduled engine and its identity
+
+**Status:** decided for the engine, open for the identity.
+
+Scheduled runs move from Claude to Copilot. The organisation
+already pays for Copilot, so triage spend becomes an existing
+entitlement rather than a third vendor relationship, and the
+pipeline stops depending on a long-lived model API key.
+
+That choice carries a cost worth stating plainly: **the schedule
+cannot label anything until §13.4 items 1 and 2 land.** The
+reusable workflow refuses live runs on this engine, so scheduled
+triage reports proposals and applies nothing. Reverting the
+schedule to `claude` is a one-line change if that proves too
+long to wait.
+
+#### Why a dedicated App rather than a shared one
+
+The credential this pipeline runs on should be a GitHub App
+created for this pipeline and nothing else. Not a personal
+access token, and not an existing organisation bot.
+
+A PAT fails on three counts. It ties an organisation-wide
+scheduled job to one person's continued employment, seat and
+attention. It expires — a 30-day token means the schedule breaks
+in 30 days, without warning, on a weekday morning. And it bills
+premium requests to that person rather than the organisation.
+
+Reusing an existing bot fails differently, and worse over time. A
+shared identity accumulates permissions as each new consumer
+asks for one more, and no consumer ever asks for one fewer. The
+result is a credential whose blast radius is the union of every
+use case that ever touched it, which is precisely what a
+leaked-token incident then costs. A single-purpose App keeps the
+blast radius equal to the job: propose and apply issue labels,
+and make Copilot requests.
+
+#### Shape
+
+The repository-access half holds up. One App, minting a token
+per role:
+
+<!-- markdownlint-disable MD013 -->
+
+| Role | Permission | Minted for | Reaches |
+| ---- | ---------- | ---------- | ------- |
+| Reading | `issues: read` | every engine's scan, as `GH_TOKEN` | issues across the target organisation |
+| Labelling | `issues: write` | engines that can label, as `GH_TOKEN` | issues in the target organisation |
+
+<!-- markdownlint-enable MD013 -->
+
+The model-access half does **not**, though an earlier revision of
+this section claimed otherwise. The idea was a third token from
+the
+same App, carrying `copilot_requests: write` and reaching the
+Copilot backend plus the `metadata: read` every installation
+token holds. That would be the strongest credential here — no
+person, no expiry outage, no stored PAT — and it may yet work.
+But see §13.3: the CLI's documented token list omits
+installation tokens, the GitHub page describing them covers the
+SDK rather than the CLI, and no run has tested one against
+1.0.80. Treat it as a candidate to verify, not a design to build
+against.
+
+Verifying it costs one App and one dispatch: mint a token with
+`copilot_requests: write`, put it in `COPILOT_GITHUB_TOKEN`, run
+the engine. It fails closed — the CLI rejects the token and the
+step fails with the evidence bundle intact — so the experiment is
+cheap and safe. Until someone runs it, the PAT carries this
+engine.
+
+One alternative sits inside the CLI's documented list and
+deserves weighing if the installation token does not work: an
+OAuth token from a GitHub App acting **for a user** (`ghu_`).
+That keeps the App identity but reintroduces a person, and needs
+refresh-token handling that an unattended schedule has nowhere
+good to keep. It trades the problem rather than solving it.
+
+Minting one token per role from one App keeps the separation
+§13.3 requires — neither credential can do the other's job —
+while leaving one identity to audit, one installation to review,
+and one private key to rotate. All expire in an hour.
+
+One caveat, and it applies to the unverified model half alone:
+GitHub's server-to-server documentation says the Copilot
+permission check requires the installation to hold **All
+repositories** access. That is broader than this pipeline needs.
+The `issues` tokens stay scoped by `repository_ids` regardless,
+so the breadth would attach to the model credential — which
+reaches no issue data, but does carry the metadata read every
+installation token holds.
+
+#### Blocker
+
+Even once verified, minting the model token needs tooling that
+does not exist yet. `actions/create-github-app-token` exposes no
+`permission-copilot-requests` input — not at v3.2.0, not at any
+later release, not on `main`. A generator produces its permission
+inputs, so this is a lag rather than a refusal. Until it catches
+up the options are a hand-rolled mint (App JWT, then
+`POST /app/installations/{id}/access_tokens` with
+`{"permissions": {"copilot_requests": "write"}}`) or a
+contribution upstream. A hand-rolled mint inside a security
+boundary deserves more care than a pinned action does, which
+argues for the contribution — and argues for settling the
+verification question first, before anyone writes either.
+
+The repository-access tokens have no such blocker:
+`permission-issues` already exists and the workflow uses it.
