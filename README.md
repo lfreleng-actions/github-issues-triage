@@ -83,8 +83,9 @@ checkout defaults to the called workflow's own commit.
 
 > [!WARNING]
 > The Copilot engine holds a weaker containment boundary than the
-> other two — see the safety model below and design doc §13.2. Use
-> it for evaluation, not for live or scheduled triage.
+> other two — see the safety model below and design doc §13.2. It
+> never applies labels: pairing it with `dry_run: false` fails
+> the run before the session starts.
 
 The `copilot` engine needs no model API key. Grant the calling
 job `copilot-requests: write` and hand its `GITHUB_TOKEN` to the
@@ -116,15 +117,18 @@ jobs:
 
 Where that policy is unavailable, pass a fine-grained PAT holding
 the "Copilot Requests" permission as `copilot_token` instead and
-drop the `copilot-requests` grant.
+drop the `copilot-requests` grant. Both routes, with their
+trade-offs, are in
+[docs/setup/GITHUB.md](docs/setup/GITHUB.md).
 
-Labels travel over the App token alone; the Copilot credential is
-never the App token. What else that credential can reach depends
-on the route. A PAT scoped to Copilot Requests reaches nothing
-but the model. The caller `GITHUB_TOKEN` carries whatever the
-calling job grants — `issues: read` and `contents: read` in the
-example above — so grant that job reads alone, or the model
-credential becomes write-capable too.
+Labels travel over a repository-access token, and the Copilot
+credential is never that same token. What else the model
+credential can reach depends on the route. A PAT scoped to
+Copilot Requests reaches nothing but the model. The caller
+`GITHUB_TOKEN` carries whatever the calling job grants —
+`issues: read` and `contents: read` in the example above — so
+grant that job reads alone, or the model credential becomes
+write-capable too.
 
 The reusable workflow does not declare `copilot-requests` itself:
 a called workflow can narrow the caller's permissions but never
@@ -140,7 +144,9 @@ work with the caller's `github.token` (`issues: read`), and live
 runs refuse to start. Applying labels needs an App installed
 across the target with `issues: write` and `metadata: read`;
 single-repository runs scope the App token to that repository at
-mint time.
+mint time. The `copilot` engine takes the same App token at
+`issues: read`, which keeps its scan organisation-wide while
+leaving it unable to label.
 
 ### Inputs
 
@@ -149,7 +155,7 @@ mint time.
 | Input | Default | Purpose |
 | ----- | ------- | ------- |
 | `org` | (required) | GitHub organisation or user to triage |
-| `engine` | `claude` | Agent engine: `claude`, `gemini`, or `copilot` |
+| `engine` | `claude` | Agent engine: `claude`, `gemini`, or `copilot` (refuses live runs) |
 | `model` | engine default | `claude-opus-5` / `gemini-3.5-flash-lite` / `claude-sonnet-5` |
 | `dry_run` | `true` | Report intended labels; apply nothing |
 | `retriage` | `false` | Re-examine issues that carry labels |
@@ -194,20 +200,25 @@ mint time.
   issue number, and label existence before a fixed `--add-label`
   operation — no `gh issue edit`, no `git`, no arbitrary shell
 - **Copilot engine caveat**: that engine restricts the model to
-  shell tools, denies the mutating `gh` and `git` verbs, and turns
-  off built-in MCP servers and custom-instruction loading. Its
-  allow-list is an approval policy rather than a filter, though,
-  and the CLI keeps auto-approving shell commands it treats as
-  reads. Those commands see both credentials in their environment,
-  and redaction works by value, so a command that encodes a token
-  defeats it. Writes stay shut, but treat this engine as opt-in
-  and unsuited to live or scheduled runs until the enforcement in
-  design doc §13.4 lands
-- **Token scope**: App tokens carry `issues: write` and
-  `metadata: read`, down-scoped at mint time, expiring in an hour.
-  The model credential is never the App token: the Anthropic and
-  Gemini keys carry no GitHub permissions at all, and a Copilot
-  PAT scoped to Copilot Requests reaches nothing but the model.
+  shell tools, denies the mutating `gh` and `git` verbs, turns
+  off built-in MCP servers and custom-instruction loading, and
+  keeps both credentials out of the agent's own environment by
+  seeding a `gh` configuration directory instead. Its allow-list
+  is an approval policy rather than a filter, though, and the CLI
+  keeps auto-approving shell commands it treats as reads. Those
+  commands run unsandboxed as the same user, so one can reach the
+  configuration file, or the CLI's own environment a process up.
+  Value-based redaction is what protects the token there, and a
+  command that encodes the value defeats it. Writes stay shut,
+  and the workflow refuses live runs on this engine until the
+  enforcement in design doc §13.4 lands
+- **Token scope**: App tokens carry `metadata: read` plus
+  `issues: write`, or `issues: read` on the `copilot` engine,
+  which cannot label. Down-scoped at mint time, expiring in an
+  hour. The model credential is never the *repository-access*
+  token this pipeline mints: the Anthropic and Gemini keys carry
+  no GitHub permissions at all, and a Copilot PAT scoped to
+  Copilot Requests reaches nothing but the model.
   The Copilot route that reuses a caller `GITHUB_TOKEN` carries
   whatever that job grants, so grant such a job reads alone
 - **Prompt-injection defence**: the policy prompt instructs the

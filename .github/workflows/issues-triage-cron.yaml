@@ -4,7 +4,7 @@
 
 # Scheduled thin caller for the reusable issues-triage workflow in
 # this repository: 07:00 UTC every weekday, scanning the whole
-# lfreleng-actions organisation.
+# organisation this repository belongs to.
 #
 # Scheduled runs stay in dry-run until the rollout completes (see
 # docs/development/DESIGN.md section 11); a manual dispatch can go
@@ -13,11 +13,18 @@
 # to block with the tagged allow-list loaded by
 # harden-runner-block-action.
 #
-# Scheduled runs always take the claude engine. A manual dispatch
-# picks any of the three; per-engine credentials and their setup
-# live in docs/setup/. The copilot engine is forced to dry-run and
-# runs without App credentials whatever the operator picks, so it
-# never holds a write-capable token (DESIGN.md section 13.2).
+# Scheduled runs take the copilot engine: the organisation already
+# pays for Copilot, so triage spend draws on an existing
+# entitlement rather than a third vendor relationship. A manual
+# dispatch picks any of the three; per-engine credentials and
+# their setup live in docs/setup/.
+#
+# The consequence is that scheduled triage reports and never
+# labels: the reusable workflow refuses live runs on this engine,
+# and down-scopes its App token to issues:read, until the
+# command-level enforcement in DESIGN.md section 13.4 lands.
+# Switching this back to 'claude' is the one-line fix if that
+# wait proves too long.
 name: 'Issues Triage ⏰'
 
 # yamllint disable-line rule:truthy
@@ -28,13 +35,13 @@ on:
   workflow_dispatch:
     inputs:
       engine:
-        description: 'Agent engine (copilot forces dry-run, no App)'
+        description: 'Agent engine (copilot cannot apply labels)'
         type: choice
         options:
+          - copilot
           - claude
           - gemini
-          - copilot
-        default: 'claude'
+        default: 'copilot'
       dry_run:
         description: 'Report intended labels; apply nothing'
         type: boolean
@@ -66,17 +73,21 @@ jobs:
       contents: read  # Asset checkout and repository metadata reads
     uses: ./.github/workflows/issues-triage.yaml
     with:
-      org: 'lfreleng-actions'
-      # Scheduled runs hold the Claude engine; a manual dispatch
+      # The owner this workflow runs under, which upstream is
+      # lfreleng-actions. Naming it this way rather than hard-coding
+      # it keeps a fork's scheduled runs inside the fork.
+      org: "${{ github.repository_owner }}"
+      # Scheduled runs hold the Copilot engine; a manual dispatch
       # takes the operator's choice. The fallback covers schedule
       # events, which carry no inputs, and API dispatches that
       # omit this one.
-      engine: ${{ inputs.engine || 'claude' }}
+      engine: ${{ inputs.engine || 'copilot' }}
       # Scheduled runs are always dry-run during rollout; manual
       # dispatch runs take the operator's choice, except on the
-      # copilot engine. That engine's containment gap (DESIGN.md
-      # section 13.2) rules out live label writes, so the caller
-      # forces dry-run rather than trusting the input description.
+      # copilot engine. The reusable workflow refuses a live run on
+      # that engine outright (DESIGN.md section 13.2); forcing the
+      # input here turns what would be a failed run into a working
+      # dry-run one.
       dry_run: >-
         ${{ github.event_name == 'schedule' || inputs.dry_run ||
         inputs.engine == 'copilot' }}
@@ -85,18 +96,11 @@ jobs:
       egress_policy: 'audit'
       # The App variables live at org level; when unset the
       # reusable falls back to github.token (single-repo scope),
-      # which suits dry-run rollout.
-      #
-      # The copilot engine gets no App credential at all. Forcing
-      # dry-run stops the label wrapper, but the App token would
-      # still sit in that engine's shell environment as GH_TOKEN
-      # carrying issues:write, and its containment gap (DESIGN.md
-      # section 13.2) leaves auto-approved shell commands able to
-      # read it. Withholding the client id means no token gets
-      # minted, so the session falls back to github.token.
-      github_app_client_id: >-
-        ${{ inputs.engine != 'copilot' &&
-        vars.LF_RELENG_BOT_CLIENT_ID || '' }}
+      # which suits dry-run rollout. The reusable down-scopes the
+      # App token to issues:read on the copilot engine (DESIGN.md
+      # section 13.4), so this passes the client id unconditionally
+      # and that engine keeps the org-wide reads the scan needs.
+      github_app_client_id: ${{ vars.LF_RELENG_BOT_CLIENT_ID || '' }}
       # Run the pipeline with the assets from the triggering commit.
       assets_repository: ${{ github.repository }}
       assets_ref: ${{ github.sha }}

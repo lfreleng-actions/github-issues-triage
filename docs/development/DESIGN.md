@@ -689,8 +689,9 @@ steps, the engine-aware key guard and model resolution, Gemini
 `model.maxSessionTurns`, telemetry into the artefact directory),
 session-summary capture,
 and the `engine` choice on the manual dry-run dispatch and the
-scheduled caller's dispatch. Scheduled runs stay on the Claude
-engine until the org validates Gemini output quality.
+scheduled caller's dispatch. Scheduled runs went to the Copilot
+engine instead (§13.6); Gemini stays a dispatch-time choice until
+the org validates its output quality.
 
 Remaining:
 
@@ -718,9 +719,10 @@ Remaining:
 
 ## 13. Third Engine: GitHub Copilot
 
-**Status:** Implemented and opt-in. Not fit for live or scheduled
-runs until the command-level enforcement in §13.4 lands — see the
-containment note in §13.2 for what that gap costs.
+**Status:** Implemented and opt-in. The reusable workflow refuses
+a live run on this engine, so it never applies labels, and that
+stands until the command-level enforcement in §13.4 lands — see
+the containment note in §13.2 for what that gap costs.
 
 The organisation already pays for Copilot. A Copilot engine turns
 triage spend into an existing entitlement rather than a third
@@ -774,6 +776,7 @@ Actions documentation shows for direct use.
 | Prompt | `prompt` input | `prompt` input | `--prompt`, read from `artefacts/prompt.md` |
 | Model | `--model` via `claude_args` | `gemini_model` input | `--model` |
 | Tool containment | `--allowedTools` grant list | `settings` JSON: `tools.core` | `--available-tools` and `--deny-tool` (enforced), `--allow-tool` (approval) |
+| Repository credential | `GH_TOKEN` in the agent's environment | `GH_TOKEN` in the agent's environment | seeded `gh` config dir; absent from the agent's environment |
 | Turn ceiling | `--max-turns` | `model.maxSessionTurns` | none — the step timeout bounds it |
 | Session evidence | `execution_file` output | telemetry log plus summary output | `--log-dir` plus `--share` transcript |
 
@@ -784,54 +787,128 @@ Containment notes specific to this engine:
 - **Approval versus enforcement.** `--allow-tool` is not the
   allow-list `--allowedTools` is on the Claude side. The CLI
   auto-approves shell commands it classifies as reads, so naming
-  four `gh` commands pre-approves those without denying others.
+  the `gh` groups pre-approves those without denying others.
   The engine layers three mechanisms in response:
   `--available-tools` restricts the model to the shell tools and
   nothing else, which the CLI enforces outright ("the model won't
   be able to use it at all"); `--deny-tool` blocks the mutating
   `gh` and `git` verbs, and outranks every allow rule and any
   approval the CLI would otherwise infer; `--allow-tool`
-  pre-approves the four commands the policy needs.
+  pre-approves the groups the policy needs.
 
   What survives that stack is **other commands the CLI treats as
-  reads**, which it auto-approves and no flag withdraws. That
-  matters more than "wider reads": the agent's shell carries both
-  credentials in its environment, and `--secret-env-vars` redacts
-  by *value*, so a command that transforms a token (encoding it,
-  say) defeats the redaction and can land it in the step log and
-  the 90-day evidence bundle. The App token's one-hour lifetime
-  bounds the damage, not the exposure.
+  reads**, which it auto-approves and no flag withdraws. A run
+  confirmed the gap concretely: with no allow rule at all, `ls`
+  and `cat` both ran, and `cat` returned a file's contents. (The
+  same run showed `gh` sitting outside that classifier — the CLI
+  refused an unapproved `gh label list` — so the gap covers
+  ordinary shell reads, not the policy's own commands.)
+
+  That matters more than "wider reads". The engine keeps both
+  credentials out of the agent's *own* environment (see the
+  redaction note below), which removes the easiest route to a
+  token — a bare `$GH_TOKEN` expansion. It does not remove the
+  general one. Shell commands run unsandboxed by default, as the
+  same user as the CLI, so an auto-approved read reaches the
+  parent process's environment: a run confirmed `ps eww -p $PPID`
+  running without any allow rule and returning the CLI's full
+  environment. Registered values come back masked, so the
+  remaining step is a transformation — encoding the value —
+  which redaction cannot follow.
+
+  Two conclusions follow. Withholding a credential from the
+  agent's shell is worth doing and is not a boundary. And the
+  90-day evidence bundle holds whatever the session could reach,
+  rather than whatever the run granted it.
 
   Writes remain shut regardless — the wrapper, the deny rules,
   and the token scope each enforce that independently — but this
   is a materially weaker boundary than the other two engines
   offer, and prompt-injected issue text is the threat it fails
   against. Closing it needs a `preToolUse` hook vetting each
-  command against the policy's four (§13.4). Until that lands,
-  treat the engine as opt-in and unsuited to live or scheduled
-  runs.
-- **Shell pattern matching.** The CLI reference describes the
-  `:*` suffix as "the command stem followed by a space", while
-  GitHub's own `gh-aw` compiler documents the bare form as a
-  prefix match (`shell(jq)` matching `jq '.filter' …`). The two
-  readings disagree about whether `shell(gh issue list)` covers
-  `gh issue list --owner …`. The engine sidesteps the question by
-  emitting both forms of every pattern: one matches under either
-  reading, and neither widens the grant, since both anchor on the
-  same command. The deny list carries both forms for the same
-  reason — a deny rule that fails to match protects nothing.
-- **Deny rules.** They outrank every allow rule and any approval
-  the CLI would otherwise infer, so the engine restates the
-  boundary explicitly: no `write`, no `git`, no `gh issue edit`.
-  Every label still travels through the wrapper.
-- **Token redaction.** The CLI redacts `GITHUB_TOKEN` and
-  `COPILOT_GITHUB_TOKEN` from its output by default, but not
-  `GH_TOKEN` — which here holds the App token carrying
-  `issues: write`. Since this engine writes CLI logs and a
-  session transcript into an artefact kept for 90 days,
-  `--secret-env-vars` registers `GH_TOKEN` explicitly. The other
-  two engines emit no comparable transcript of the shell
-  environment.
+  command against the commands the policy names (§13.4). Until
+  that lands, the engine is opt-in, and the reusable workflow
+  refuses live runs on it outright.
+- **Shell pattern matching.** The CLI approves `gh` and `git`
+  commands on their **first-level subcommand** alone. A run
+  confirmed it: `shell(gh label:*)` matches
+  `gh label list --repo …`, while `shell(gh label list:*)` matches
+  nothing at all — the CLI refuses the command outright, and in
+  `-p` mode a refused command cannot ask for approval. The same
+  run showed **deny** rules matching at full-command granularity:
+  `shell(gh issue edit:*)` blocks `gh issue edit …` even while
+  `shell(gh issue:*)` allows the group.
+
+  That asymmetry shapes the grant. Allow rules name the three
+  first-level groups the policy needs — `gh search`, `gh issue`,
+  `gh label` — and deny rules pare each group back to the verbs
+  the policy actually uses. Mutating verbs go without saying
+  (`gh issue edit`, `gh label create`). The non-issue searches
+  are easier to miss: `gh search` covers `code`, `commits`,
+  `prs` and `repos`, and `gh search code` would put repository
+  content in front of the model and into a 90-day artefact. The
+  engine still emits the bare and `:*` forms of each pattern,
+  since the bare form covers a bare command and neither widens
+  the grant.
+- **Deny rules, and what they are worth.** They outrank every
+  allow rule and any approval the CLI would otherwise infer, and
+  they match further down the command than allow rules do. That
+  makes them useful, and invites reading them as a
+  command-level boundary. They are not one. Matching keys on the
+  leading words of the command, and two valid `gh` spellings walk
+  past it — both confirmed by run, against the production deny
+  list:
+
+  <!-- markdownlint-disable MD013 -->
+
+  | Command | Why it slips through |
+  | ------- | -------------------- |
+  | `gh issue new …` | `new` is an alias of `issue create`; the rule names `gh issue create` |
+  | `gh issue -R o/r edit 1 …` | `-R` is a persistent flag on `gh issue`, so the command no longer begins `gh issue edit` |
+
+  <!-- markdownlint-enable MD013 -->
+
+  The alias is now named in the list, but flag placement defeats
+  **every** entry and no amount of enumeration fixes it: the
+  agent may put any persistent flag ahead of any subcommand.
+
+  So the deny list is defence in depth, and the real enforcement
+  sits elsewhere: this engine runs with an `issues: read` App
+  token and the workflow refuses live runs, so a bypassed rule
+  reaches an API that rejects the write. That layering is why the
+  gap costs nothing today — and why §13.4's command-vetting hook
+  is a hard precondition for ever pairing this engine with a
+  write-capable token, rather than an improvement to schedule
+  later.
+- **Token redaction, and the credential the agent never sees.**
+  `--secret-env-vars` does two jobs, and the second one bites:
+  it redacts the named variables' values from output **and**
+  strips those variables from the environment of every shell the
+  agent runs. A run confirmed the strip — a variable named there
+  reads back unset inside an agent command, and the same variable
+  reads back set when the flag omits it.
+
+  So the flag cannot cover `GH_TOKEN`, which is where the
+  repository credential lives: the agent's own `gh` commands
+  would lose their authentication. The engine instead seeds a
+  scratch `gh` configuration directory (`GH_CONFIG_DIR`, under
+  the runner's temporary space) with the token before starting
+  the session, and leaves `GH_TOKEN` in `--secret-env-vars`. The
+  agent's `gh` works from the configuration file; the credential
+  never appears in the agent's environment at all; and
+  value-based redaction still covers it, because the CLI's own
+  process keeps `GH_TOKEN` set — a run confirmed that a file
+  holding the value comes back redacted when the agent reads it.
+
+  That is an improvement on the other two engines here, and it
+  delivers part of the alternative floated in §13.4: no
+  credential sits in the agent's shell environment. It closes
+  none of the gap above. The configuration file remains readable,
+  and so does the CLI's own environment one process up — shell
+  commands run unsandboxed as the same user, and a run confirmed
+  an unapproved `ps eww -p $PPID` returning it. Redaction, not
+  absence, is what protects the value at that point, and
+  redaction follows values rather than intent.
 - **Built-in MCP servers, disabled.** Copilot CLI ships a GitHub
   MCP server enabled by default, whose `label_write` tool would
   apply labels without passing through `apply-label.sh` — around
@@ -854,26 +931,52 @@ Containment notes specific to this engine:
 
 Copilot CLI reads its credential from `COPILOT_GITHUB_TOKEN`,
 then `GH_TOKEN`, then `GITHUB_TOKEN`. The engine sets the first
-(model access) and the second (the App token, repository access)
-so the two never mix: an App installation token cannot
-authenticate Copilot requests, and the Copilot credential is
-never the App token. What the Copilot credential *can* reach
-depends on the route. A PAT scoped to Copilot Requests reaches
-nothing but the model. A caller `GITHUB_TOKEN` carries whatever
-its job grants, so a caller that grants write hands write to the
-model credential too; the separation keeps the App token out of
-the CLI, it does not by itself bound the caller token.
+(model access) and the second (repository access) so the two
+never mix. What the Copilot credential *can* reach depends on the
+route. A PAT scoped to Copilot Requests reaches nothing but the
+model. A caller `GITHUB_TOKEN` carries whatever its job grants,
+so a caller that grants write hands write to the model credential
+too; separating the two variables keeps the repository credential
+out of the model path, it does not by itself bound the caller
+token.
 
-Two credentials work for the `copilot_token` secret:
+Two credentials work for the `copilot_token` secret today, and a
+third remains a candidate (§13.6):
 
 1. **The calling job's `GITHUB_TOKEN`**, where that job grants
-   `copilot-requests: write`. GitHub's recommended path: no
-   stored secret, a short-lived token per run, and usage metered
-   to the organisation. It depends on the organisation policy
-   "Allow use of Copilot CLI billed to the organization".
+   `copilot-requests: write`. No stored secret, a short-lived
+   token per run, usage metered to the organisation. It depends
+   on the organisation policy "Allow use of Copilot CLI billed to
+   the organization", which GitHub enables by default wherever
+   Copilot CLI is on.
 2. **A fine-grained PAT** carrying the "Copilot Requests"
    permission. Works regardless of that policy, at the cost of a
    long-lived credential attributing spend to one person's seat.
+   The permission sits under **Account permissions**, which
+   GitHub offers when the token's resource owner is the user
+   rather than an organisation. The CLI refuses classic PATs
+   outright, whatever scopes they carry.
+
+The CLI states its own supported list, worth quoting here
+because it bounds what this pipeline may rely on. From
+`copilot login --help` at 1.0.80:
+
+> Supported token types include fine-grained personal access
+> tokens (v2 PATs) with the "Copilot Requests" permission, OAuth
+> tokens from the GitHub Copilot CLI app, and OAuth tokens from
+> the GitHub CLI (gh) app.
+
+App **installation** tokens (`ghs_`) are absent from that list.
+GitHub does document installation tokens making Copilot requests
+— "a service [that] needs to make Copilot requests on behalf of
+an organization without a user's credentials" — but that page
+covers the Copilot **SDK**, whose runtime is not this harness.
+An earlier revision of this document said flatly that an
+installation token *cannot* authenticate Copilot requests; a
+later one said it can and named it the best credential here.
+Both overreached. What holds is narrower: the capability exists
+at the API, the CLI does not document it, and no run has tested
+it. §13.6 tracks it as a candidate rather than a route.
 
 The reusable workflow takes a **secret** rather than declaring
 the permission itself, because a reusable-workflow chain can hold
@@ -887,8 +990,8 @@ the engine.
 This repository's own callers use the PAT for now: neither the
 pinned actionlint (1.7.12.24) nor the SchemaStore workflow schema
 (check-jsonschema 0.38.0) recognises the `copilot-requests`
-scope, so declaring it locally would fail the linting gate.
-Revisit once both learn it.
+scope, so declaring it locally would fail the linting gate. That
+blocks route 1 until both learn the scope.
 
 One caveat on route 1. The secret's value comes from an
 expression the **caller** evaluates, so it carries the caller
@@ -916,57 +1019,190 @@ model default, the tool-surface restriction plus the
 allow/deny translation of the shared tool grants, the pinned CLI
 install, session evidence into the artefact bundle, and the
 `copilot` choice on the manual dry-run dispatch and the scheduled
-caller's dispatch. Scheduled runs stay on the Claude engine. The
-scheduled caller forces dry-run for this engine and withholds the
-GitHub App credential from it, so a Copilot session holds no
-write-capable token at all until the enforcement below lands.
+caller's dispatch. Scheduled runs take the Copilot engine
+(§13.6). The reusable workflow refuses a live run on this
+engine, and down-scopes its App token to `issues: read`, so a
+Copilot session holds no write-capable credential until the
+enforcement below lands. Down-scoped rather than absent, because
+the scan needs the App's org-wide reach: `github.token` is
+repository-scoped, and a Copilot run without an App token would
+see no repository but its own. Both guards live in the reusable
+workflow rather than the caller, so every consumer inherits
+them.
 
 Remaining:
 
 1. **Precondition for live use** — command-level enforcement: a
    `preToolUse` hook vetting each proposed shell command against
-   the policy's four, closing the auto-approved-reads gap in
-   §13.2. Needs the hook payload contract confirmed against a
-   real session before it goes anywhere near a security boundary.
-   An alternative worth weighing: route `gh` through a
-   token-holding wrapper so no credential sits in the agent's
-   shell environment at all
-2. Cost telemetry: `load_transcript_stats` parses a Claude-shaped
+   the commands the policy names. It closes two gaps in §13.2,
+   not one: the auto-approved reads, and the deny rules that
+   flag placement walks past. Needs the hook payload contract
+   confirmed against a real session before it goes anywhere near
+   a security boundary. Half of the alternative once floated
+   here — keeping the credential out of the agent's shell — has
+   landed as the seeded `gh` configuration directory (§13.2),
+   though §13.2 also records why that buys less than it looks
+   like; the remaining half is vetting the commands themselves
+2. **Second precondition for live use** — a route to the label
+   wrapper. The CLI approves shell commands on their first-level
+   stem, so `shell(bash triage-assets/scripts/apply-label.sh:*)`
+   matches nothing, and the workable grant would be bare `bash`.
+   A run confirmed the fix: install the wrapper as an executable
+   on `PATH` under its own name, which `shell(<name>:*)` then
+   grants and nothing more
+3. Cost telemetry: `load_transcript_stats` parses a Claude-shaped
    execution log; map the Copilot CLI's log fields so the report
    carries turns and spend for this engine too (defensive parsing
    means unmapped fields drop out rather than break the report)
-3. Confirm the organisation billing policy, then move this
-   repository's callers from the PAT to the caller `GITHUB_TOKEN`
-   once the linting toolchain recognises `copilot-requests`
-4. Egress: an audit-mode Copilot run to harvest endpoints
+4. Replace the fine-grained PAT with a dedicated GitHub App
+   (§13.6). Two questions gate it. First, verify that the CLI
+   accepts an App installation token at all: its documented
+   token list omits them (§13.3), so the whole route may not
+   exist. Second, even if it does,
+   `create-github-app-token` exposes no
+   `permission-copilot-requests` input at any released version
+   or on `main`, so the token needs a hand-rolled mint or an
+   upstream contribution to that action. Neither question
+   touches the App's repository-access tokens
+5. Egress: an audit-mode Copilot run to harvest endpoints
    (`api.githubcopilot.com:443` and `registry.npmjs.org:443`
    expected, plus the Node distribution host used by
    `setup-node`) for the org allow-list, as §7.1 did for
-   Anthropic
+   Anthropic. A first audit run recorded `api.github.com:443`,
+   `github.com:443` and `registry.npmjs.org:443`; the Copilot
+   backend itself has yet to appear, because that run failed
+   authentication before reaching it
 
 ### 13.5 Open questions (Copilot track)
 
-1. **Shell pattern matching** — confirm in a real run which of
-   the two documented readings the CLI implements for multi-word
-   `gh` subcommands. The engine emits both forms, so a session
-   should work either way; the run settles which form to keep.
-2. **The caller `GITHUB_TOKEN` route** — confirm that a token
+1. **The caller `GITHUB_TOKEN` route** — confirm that a token
    passed in as a named secret reaches the CLI carrying the
    caller job's `copilot-requests: write` grant (§13.3). Blocked
    behind the linting gate, so the PAT route carries the engine
    until then.
-3. **Model choice** — `claude-sonnet-5` against
+2. **Model choice** — `claude-sonnet-5` against
    `claude-haiku-4.5` for what is a classification workload;
    measure quality against cost on a real backlog.
-4. **Folder trust** — the CLI asks a session to confirm it
-   trusts its working directory, and `--no-ask-user` disables the
-   agent's `ask_user` tool rather than that startup prompt. A
-   runner's config directory starts empty every run, so the
-   question applies to GitHub's own documented Actions example
-   too, which is the evidence that `-p` mode skips the prompt.
-   Confirm on the first real run; the failure mode is a stalled
-   session that the step timeout ends.
-5. **Premium-request accounting** — whether per-request billing
+3. **Premium-request accounting** — whether per-request billing
    makes retriage runs materially more expensive here than on the
    metered API engines, and where the analogue of a per-workspace
    spend cap lives (cost centres, per §13.3).
+
+Settled by rehearsal runs against CLI 1.0.80:
+
+- **Shell pattern matching** — approval happens on the
+  first-level subcommand; denial matches the whole command. See
+  §13.2.
+- **Folder trust** — `-p` mode starts without asking, on an
+  empty `COPILOT_HOME` and an untrusted working directory alike.
+  No stall.
+
+### 13.6 The scheduled engine and its identity
+
+**Status:** decided for the engine, open for the identity.
+
+Scheduled runs move from Claude to Copilot. The organisation
+already pays for Copilot, so triage spend becomes an existing
+entitlement rather than a third vendor relationship, and the
+pipeline stops depending on a long-lived model API key.
+
+That choice carries a cost worth stating plainly: **the schedule
+cannot label anything until §13.4 items 1 and 2 land.** The
+reusable workflow refuses live runs on this engine, so scheduled
+triage reports proposals and applies nothing. Reverting the
+schedule to `claude` is a one-line change if that proves too
+long to wait.
+
+#### Why a dedicated App rather than a shared one
+
+The credential this pipeline runs on should be a GitHub App
+created for this pipeline and nothing else. Not a personal
+access token, and not an existing organisation bot.
+
+A PAT fails on three counts. It ties an organisation-wide
+scheduled job to one person's continued employment, seat and
+attention. It expires — a 30-day token means the schedule breaks
+in 30 days, without warning, on a weekday morning. And it bills
+premium requests to that person rather than the organisation.
+
+Reusing an existing bot fails differently, and worse over time. A
+shared identity accumulates permissions as each new consumer
+asks for one more, and no consumer ever asks for one fewer. The
+result is a credential whose blast radius is the union of every
+use case that ever touched it, which is precisely what a
+leaked-token incident then costs. A single-purpose App keeps the
+blast radius equal to the job: propose and apply issue labels,
+and make Copilot requests.
+
+#### Shape
+
+The repository-access half holds up. One App, minting a token
+per role:
+
+<!-- markdownlint-disable MD013 -->
+
+| Role | Permission | Minted for | Reaches |
+| ---- | ---------- | ---------- | ------- |
+| Reading | `issues: read` | every engine's scan, as `GH_TOKEN` | issues across the target organisation |
+| Labelling | `issues: write` | engines that can label, as `GH_TOKEN` | issues in the target organisation |
+
+<!-- markdownlint-enable MD013 -->
+
+The model-access half does **not**, though an earlier revision of
+this section claimed otherwise. The idea was a third token from
+the
+same App, carrying `copilot_requests: write` and reaching the
+Copilot backend plus the `metadata: read` every installation
+token holds. That would be the strongest credential here — no
+person, no expiry outage, no stored PAT — and it may yet work.
+But see §13.3: the CLI's documented token list omits
+installation tokens, the GitHub page describing them covers the
+SDK rather than the CLI, and no run has tested one against
+1.0.80. Treat it as a candidate to verify, not a design to build
+against.
+
+Verifying it costs one App and one dispatch: mint a token with
+`copilot_requests: write`, put it in `COPILOT_GITHUB_TOKEN`, run
+the engine. It fails closed — the CLI rejects the token and the
+step fails with the evidence bundle intact — so the experiment is
+cheap and safe. Until someone runs it, the PAT carries this
+engine.
+
+One alternative sits inside the CLI's documented list and
+deserves weighing if the installation token does not work: an
+OAuth token from a GitHub App acting **for a user** (`ghu_`).
+That keeps the App identity but reintroduces a person, and needs
+refresh-token handling that an unattended schedule has nowhere
+good to keep. It trades the problem rather than solving it.
+
+Minting one token per role from one App keeps the separation
+§13.3 requires — neither credential can do the other's job —
+while leaving one identity to audit, one installation to review,
+and one private key to rotate. All expire in an hour.
+
+One caveat, and it applies to the unverified model half alone:
+GitHub's server-to-server documentation says the Copilot
+permission check requires the installation to hold **All
+repositories** access. That is broader than this pipeline needs.
+The `issues` tokens stay scoped by `repository_ids` regardless,
+so the breadth would attach to the model credential — which
+reaches no issue data, but does carry the metadata read every
+installation token holds.
+
+#### Blocker
+
+Even once verified, minting the model token needs tooling that
+does not exist yet. `actions/create-github-app-token` exposes no
+`permission-copilot-requests` input — not at v3.2.0, not at any
+later release, not on `main`. A generator produces its permission
+inputs, so this is a lag rather than a refusal. Until it catches
+up the options are a hand-rolled mint (App JWT, then
+`POST /app/installations/{id}/access_tokens` with
+`{"permissions": {"copilot_requests": "write"}}`) or a
+contribution upstream. A hand-rolled mint inside a security
+boundary deserves more care than a pinned action does, which
+argues for the contribution — and argues for settling the
+verification question first, before anyone writes either.
+
+The repository-access tokens have no such blocker:
+`permission-issues` already exists and the workflow uses it.

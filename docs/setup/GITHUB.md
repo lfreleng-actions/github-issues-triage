@@ -10,14 +10,19 @@ version and invoked directly — no first-party action exists.
 Authenticates with a GitHub token rather than a model API key, so
 this engine adds no third vendor relationship.
 
-> **⚠️ Not for live or scheduled runs.**
-> This engine holds a weaker containment boundary than the other
-> two. Its tool allow-list is an approval policy rather than a
-> filter, and the CLI keeps auto-approving shell commands it
-> treats as reads. Treat it as opt-in for evaluation, not as an
-> engine for live or scheduled triage, until the command-level
-> enforcement in section 13.4 of
-> [`../development/DESIGN.md`](../development/DESIGN.md) lands.
+> **⚠️ This engine reports; it never applies labels.**
+> It holds a weaker containment boundary than the other two. Its
+> tool allow-list is an approval policy rather than a filter, and
+> the CLI keeps auto-approving shell commands it treats as reads.
+> The reusable workflow **refuses a live run on this engine**:
+> pair it with `dry_run: true` or the run fails fast, and its App
+> token comes back down-scoped to `issues: read` either way.
+>
+> This repository schedules dry runs on it every weekday, so a
+> scheduled run is a supported configuration. What waits on the
+> command-level enforcement in section 13.4 of
+> [`../development/DESIGN.md`](../development/DESIGN.md) is live
+> labelling, on any trigger.
 
 <!-- markdownlint-disable MD013 -->
 
@@ -28,6 +33,7 @@ this engine adds no third vendor relationship.
 | Default model | `claude-sonnet-5` |
 | Harness | `@github/copilot` CLI, pinned, installed with npm |
 | Turn ceiling | None — `max_turns` has no analogue; the 20-minute step timeout bounds the session |
+| Label writes | Refused; the engine never applies labels |
 
 <!-- markdownlint-enable MD013 -->
 
@@ -48,26 +54,35 @@ else the credential can reach.
 | Needs a Copilot seat | No | Yes, held by the PAT owner |
 | Needs an org policy | Yes | No |
 | Other repository access | Whatever else the calling job grants | None |
-| GitHub's recommendation | Preferred for automation | Fallback |
+| Tied to a person | No | Yes |
 
 <!-- markdownlint-enable MD013 -->
 
-Route A is the better credential and the one GitHub recommends.
-Route B exists for organisations that cannot enable the policy,
-and for evaluating the engine before committing to it.
+Route A is the credential GitHub recommends for workflows. Route
+B is the quickest to try, and the right choice for evaluating the
+engine before committing to it. Route B is what this repository
+uses today, because route A waits on toolchain support for the
+`copilot-requests` scope.
 
 Neither route *needs* repository write, and route B cannot gain
-it: a PAT scoped to Copilot Requests alone reaches nothing but
-the model. Route A is not self-limiting in the same way. It hands
-the calling job's `GITHUB_TOKEN` to the CLI, so that credential
-carries every permission the job grants — grant that job nothing
-but reads plus `copilot-requests: write`, as the example below
-does, or the model credential becomes write-capable.
+it: a fine-grained PAT carrying Copilot Requests alone holds no
+repository permission whatever. Route A is not self-limiting in
+the same way. It
+hands the calling job's `GITHUB_TOKEN` to the CLI, so that
+credential carries every permission the job grants — grant that
+job nothing but reads plus `copilot-requests: write`, as the
+example below does, or the model credential becomes
+write-capable.
 
-Labels travel over the GitHub App token described in
-[README.md](README.md) either way, and the two credentials never
-mix: an App installation token cannot authenticate Copilot
-requests in any case.
+Labels travel over the separate GitHub App token described in
+[README.md](README.md) whichever route you pick, and the workflow
+reads the two from different environment variables so the
+repository credential never reaches the Copilot backend. That is
+a routing guarantee, not a scope one: on route B the model
+credential genuinely cannot touch a repository, while on route A
+it carries whatever the calling job granted. Grant such a job
+reads and nothing more — the workflow receives the secret already
+evaluated and cannot narrow it.
 
 ## Route A: the caller's `GITHUB_TOKEN`
 
@@ -143,11 +158,30 @@ organisation's billing dashboard while the engine is new.
 
 1. Go to
    <https://github.com/settings/personal-access-tokens/new>.
-2. Grant the **Copilot Requests** permission.
-3. Grant **no repository permissions**. This engine needs the
+2. Set **Resource owner** to your **personal account**. The
+   Copilot Requests permission sits under **Account
+   permissions**, which GitHub hides when an organisation owns
+   the token — pick an organisation and the permission vanishes
+   from the page.
+3. Grant the **Copilot requests** permission.
+4. Grant **no repository permissions**. This engine needs the
    token for model access alone, and withholding repository
    access is the point of the split.
-4. Set the shortest expiry you can live with, and copy the value.
+5. Set the shortest expiry you can live with, and copy the value.
+
+GitHub publishes a link that preselects the permission:
+<https://github.com/settings/personal-access-tokens/new?name=Copilot+requests+token&user_copilot_requests=write>
+
+The token has to be fine-grained. The CLI inspects the value and
+refuses a classic PAT outright, whatever scopes it carries:
+`The COPILOT_GITHUB_TOKEN environment variable contains a classic
+PAT.`
+
+Remember that the expiry is a scheduled outage. A 30-day token
+breaks the weekday schedule in 30 days, on a weekday morning,
+with no warning beforehand. Section 13.6 of
+[`../development/DESIGN.md`](../development/DESIGN.md) tracks the
+search for a credential without that failure mode.
 
 The token's owner must hold an active Copilot seat or
 subscription: requests draw on that person's entitlement, and
@@ -210,9 +244,13 @@ fails the run before the session starts.
 | Symptom | Cause | Fix |
 | ------- | ----- | --- |
 | `Agent runs with engine 'copilot' need the copilot_token secret` | No secret reached the workflow | Add the secret, or pass the caller's token through |
+| `The copilot engine cannot apply labels` | The run set `dry_run: false` | Set `dry_run: true`, or choose `claude` or `gemini` |
 | CLI rejects the token on route A | The organisation policy is off, or the grant did not survive the hand-off | Enable the policy; otherwise fall back to route B |
 | CLI rejects the token on route B | The PAT lacks Copilot Requests, has expired, or its owner holds no Copilot seat | Reissue the PAT, or assign its owner a seat |
+| `COPILOT_GITHUB_TOKEN … contains a classic PAT` | A classic PAT reached the CLI, which refuses them regardless of scope | Issue a fine-grained PAT instead |
 | Session stalls until the step timeout | The CLI waited on an interactive prompt | Capture the run's artefact bundle and report it |
+| Every agent command reports `Permission denied and could not request permission from user` | The tool grants no longer match what the CLI expects | Compare against section 13.2 of [`../development/DESIGN.md`](../development/DESIGN.md); the CLI approves `gh` on its first-level subcommand |
+| Agent `gh` commands report missing authentication | The seeded `gh` configuration directory did not reach the session | Check the `GH_CONFIG_DIR` set-up in the agent step |
 
 <!-- markdownlint-enable MD013 -->
 
