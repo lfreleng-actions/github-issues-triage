@@ -480,7 +480,7 @@ jobs:
         # cancel those too.
         timeout-minutes: 20
         # yamllint disable-line rule:line-length
-        uses: anthropics/claude-code-action@459ad358ae43fea66bfefd0a1f8d840b4b9791fb # v1.0.194
+        uses: anthropics/claude-code-action@e5ad3c7725bc2459721893f88879fef9dbcf97b0 # v1.0.202
         env:
           GH_TOKEN: "${{ steps.app-token.outputs.token || github.token }}"
           # Enforced by apply-label.sh, independent of the prompt:
