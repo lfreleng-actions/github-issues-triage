@@ -63,8 +63,8 @@ it never applied shows up as a difference between the two snapshots.
 ## Safety model in brief
 
 Dry-run is the default: consumers opt in to live labelling. The
-agent receives read verbs of `gh` and nothing else, in every
-mode; it proposes, and a separate workflow step validates each
+tool policy grants the agent read verbs of `gh`, in every mode;
+it proposes, and a separate workflow step validates each
 proposal and performs the writes. The repository credential the
 session holds is an `issues: read` App token, so it cannot label
 through its own grant. Every write travels over a second App
@@ -77,7 +77,8 @@ Containment differs by engine, so the worst case does too. The
 Claude and Gemini engines hold the agent to a tool allow-list the
 harness enforces, and a mislabelled issue is the ceiling. The
 Copilot engine's allow-list is an approval policy rather than a
-filter, and one of its routes reuses the calling job's
+filter, so the CLI auto-approves shell reads beyond the `gh`
+verbs above, and one of its routes reuses the calling job's
 `GITHUB_TOKEN`. That bounds what the *session* can reach; a
 separate bound governs what gets written, because no engine
 applies anything itself — see

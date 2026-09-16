@@ -10,6 +10,13 @@ SPDX-FileCopyrightText: 2026 The Linux Foundation
 **Author:** Matthew Watkins (AI-drafted, human-reviewed)
 **Last updated:** 2026-08-17
 
+**How to read this.** Sections record decisions in the order
+taken. A later section supersedes an earlier one rather than
+rewriting it, so where two disagree, the higher number holds.
+§13.7 carries the current answer to how writes happen: the agent
+proposes and a separate step applies, and the `apply-label.sh`
+wrapper that earlier sections describe no longer exists.
+
 ## 1. Problem Statement
 
 Open issues across the `lfreleng-actions` organisation routinely sit
@@ -144,11 +151,13 @@ Notes:
   (`claude-opus-5-…`) against the Anthropic model list when
   implementing; treat it as a workflow-level `env` value so bumps are
   one-line changes.
-- **Tool allow-list is the primary containment**: the agent gets
-  read/label verbs of `gh` and nothing more — no `git`, no file
-  writes that matter, no arbitrary shell. Even a fully confused agent
-  cannot close issues, comment, or push code, because the token (§5)
-  and the tool list both forbid it.
+- **Tool allow-list is the primary containment** — superseded by
+  §13.7 ⚠️: the agent got read/label verbs of `gh` and nothing
+  more — no `git`, no file writes that matter, no arbitrary
+  shell. Two findings undid the reasoning. §13.2 showed an
+  allow-list can be an approval prompt rather than a filter, and
+  §13.7 took the write out of the session altogether, so the
+  credential rather than the tool list is what holds writes shut.
 - `--max-turns` bounds runaway loops; the job also carries a
   `timeout-minutes` ceiling (suggest 30).
 
@@ -571,6 +580,10 @@ README.md                                    # rewritten for this repo
 
 ## 9. Failure Modes and Mitigations
 
+The two rows naming the label wrapper record the containment of
+the day. §13.7 replaced it: the agent holds no write at all, and
+the applier checks each proposal rather than each command.
+
 <!-- markdownlint-disable MD013 -->
 
 | Failure | Mitigation |
@@ -634,7 +647,7 @@ README.md                                    # rewritten for this repo
 IT direction steers most agentic work towards Google
 Gemini, so the pipeline gains a second agent engine. The
 architecture already isolates the provider: snapshots, exclusion
-filtering, the policy prompt, the label wrapper, diff reporting,
+filtering, the policy prompt, the applier, diff reporting,
 and artefact capture are all engine-neutral. The agent session is
 the single provider-specific step.
 
@@ -737,7 +750,7 @@ Copilot out, and what changed since.
 The engine slots into the existing abstraction (§12.1): a third
 mutually exclusive agent-session step behind the same `engine`
 input, sharing the snapshots, exclusion filtering, policy prompt,
-label wrapper, diff report, and artefact bundle.
+applier, diff report, and artefact bundle.
 
 ### 13.1 Harness options
 
@@ -759,7 +772,7 @@ emits `.lock.yml` workflow files, carrying its own safe-output,
 sandboxing, and permission models. Adopting it here would mean
 re-authoring the pipeline in its idiom and displacing the parts
 that stay engine-neutral and already carry review — the evidence
-pipeline (§7.2), the label wrapper, the engine abstraction. That
+pipeline (§7.2), the applier, the engine abstraction. That
 makes it the right choice for a greenfield agentic workflow, not
 for a third engine behind an established interface. Worth
 revisiting if this pipeline is ever rebuilt from scratch.
@@ -825,8 +838,8 @@ Containment notes specific to this engine:
   90-day evidence bundle holds whatever the session could reach,
   rather than whatever the run granted it.
 
-  Writes remain shut regardless — the wrapper, the deny rules,
-  and the token scope each enforce that independently — but this
+  Writes remain shut regardless — since §13.7 the session holds
+  no write-capable credential on any engine — but this
   is a materially weaker boundary than the other two engines
   offer, and prompt-injected issue text is the threat it fails
   against. Closing it needs a `preToolUse` hook vetting each
@@ -1112,9 +1125,11 @@ pipeline stops depending on a long-lived model API key.
 That choice once carried a cost worth stating plainly: the
 schedule could not label anything, because the workflow refused
 live runs on this engine. §13.7 removed that constraint by taking
-the write out of the agent's hands entirely, so the schedule can
-now label. Reverting to `claude` remains a one-line change if the
-engine disappoints for other reasons.
+the write out of the agent's hands entirely. The schedule still
+passes `dry_run: true` while the rollout runs its course (§11),
+so what changed is that flipping it became a one-line decision
+rather than a blocked one. Reverting to `claude` remains a
+one-line change if the engine disappoints for other reasons.
 
 #### Why a dedicated App rather than a shared one
 
@@ -1243,10 +1258,14 @@ the run's own configuration before anything reaches GitHub.
 | ----- | ------- |
 | organisation, single-repository restriction, exclusion list | may this run touch that repository at all? |
 | membership of the run's own snapshot | did this run's scan actually see this issue? |
-| snapshot labels against retriage mode | was this issue in scope, or passed over on purpose? |
-| issue rather than pull request | is the target the kind of thing triage labels? |
+| live state is open, and an issue rather than a pull request | is the target still the kind of thing triage labels? |
+| live labels against retriage mode | was this issue in scope, or passed over on purpose? |
+| label sits in the taxonomy | is this a label triage may use, not merely one that exists? |
 | label exists in that repository | can this label go on without inventing it? |
 | priority and type against the organisation's definitions | do these options exist here? |
+| type against the labels beside it | does the classification agree with itself? |
+| priority and type present at all | did the agent answer, or wander off the schema? |
+| escalation paired with a `High` proposal | is this flag consistent with the grade beside it? |
 | no priority set already | has a human claimed this issue? |
 
 <!-- markdownlint-enable MD013 -->
@@ -1255,6 +1274,12 @@ The snapshot check is the one that does unobvious work. Without
 it the trust boundary is "any issue in an allowed repository",
 when it should be "the issues this run scanned" — and those
 differ by the population the scan excluded on purpose.
+
+Membership is all the snapshot decides. Eligibility comes from a
+fresh read of each issue, because a session runs for up to twenty
+minutes, and in that window a human can close an issue or label
+it themselves. Ruling on the scan's picture would let the applier
+write over whoever got there first.
 
 #### What this buys
 
@@ -1272,6 +1297,12 @@ differ by the population the scan excluded on purpose.
   receives already evaluated. The guarantee is about the
   repository credential the pipeline mints, not about every
   value a consumer may pass in.
+
+  A second caveat, and the sharper one: the session and the
+  apply step share a workspace. The claim above is about
+  credentials, and holds. It says nothing about the code the
+  apply step runs, which sits in that workspace beside the
+  agent. See the open question below.
 - **Issue fields become reachable.** `gh issue edit` sets no
   issue field, so priority travels over the REST issue-field
   endpoint — something the agent's three-command grant could
@@ -1313,32 +1344,92 @@ reads rather than closing the hole.
 
 #### Open questions
 
-1. **Claude's proposal path lacks a test.** That action exposes
-   a transcript rather than a shared summary, so a parser lifts
-   the final message out of `execution_file` — and no run has
-   exercised it. Its failure mode is silent: no proposal file,
-   and the apply step skips.
-2. **Gemini's lacks one too, and rests on a weaker assumption.**
-   This design assumes the engine's `summary` output carries the
-   agent's final message verbatim. If the action summarises
-   rather than passes through, the fenced block will not
-   survive. Confirm before relying on that engine.
-3. **Whether the applier should report rather than reject.** A
+1. **The session and the applier share a workspace, and that
+   blocks the live rollout.** The agent's shell runs
+   unsandboxed as the same user, in the same checkout the apply
+   step executes from (§13.2). `--deny-tool=write` withholds the
+   CLI's file-writing *tool*; it does nothing about a shell
+   redirect, and an auto-approved read such as `gh issue view N
+   --jq .body > triage-assets/scripts/apply_triage.py` writes a
+   file all the same. Issue text would then be the applier, run
+   against the write token minted after the session ends.
+   `artefacts/before.json` and the exclusion list sit in reach
+   too, so the snapshot bound and the scope checks rest on the
+   same sand.
+
+   The credential claim above survives this: the session still
+   holds no write-capable token. What does not survive is the
+   stronger reading, that the deterministic step is beyond the
+   agent's influence. Between them sits a filesystem.
+
+   Nothing reaches this on the **schedule**, which passes
+   `dry_run: true`. That is not the same as unreachable:
+   `issues-triage-cron.yaml` exposes `dry_run` as a dispatch
+   input, so one manual run with it unticked mints the write
+   token and opens the path. Which makes this a blocker on live
+   runs generally, not a note against a future rollout.
+
+   Two further routes reach the same place and close the same
+   way. The `copilot_token` secret may be a caller
+   `GITHUB_TOKEN` carrying `issues: write` (§13.3), and §13.2
+   records the session recovering it. And a process the session
+   started outlives the step that started it, since the runner
+   reaps orphans at job completion, so it can read a later
+   step's environment through `/proc` and take the write token
+   from there. Step boundaries are not a security boundary; job
+   boundaries are.
+
+   The fix is a second job: upload the snapshot as an artefact
+   before the agent runs, let the session finish, then apply
+   from a fresh checkout on a runner the session never touched.
+   Until that lands, a live run on this engine is not something
+   this design can justify.
+
+2. **Whether the applier should report rather than reject.** A
    rejected proposal amounts to a line in the run's JSON. For a
    long-running schedule it may be worth surfacing repeated
    rejections, which would point at prompt drift rather than
    individual bad proposals.
-4. **The report observes labels alone.** Both snapshots carry
+3. **The report observes labels alone.** Both snapshots carry
    labels, so a retriage run that changes priority or type and
    nothing else reports "no label changes" and leaves those
    writes recorded nowhere but `apply-result.json`. Either feed
    that file into the report, or extend the snapshots to capture
    issue fields and type.
-5. **Whether `Urgent` should need a human.** The applier checks
-   that the value exists, not that the evidence does — the
-   evidence rule lives in the prompt, and the prompt is advice
-   to an untrusted agent rather than a boundary. Prompt-injected
-   text could still reach `Urgent` on any unprioritised issue in
-   the snapshot. Capping the agent at `High` and leaving
-   `Urgent` to a human would make it a boundary, at the cost of
-   latency on genuine emergencies.
+4. **The apply step's own token mint has yet to run.** A fork
+   dispatch exercised the agent, the proposal, validation and
+   the apply step inside the workflow, but `testing.yaml` passes
+   no App credentials, so the mint skipped and the step fell
+   back to the job's `github.token`. That token reads no
+   organisation fields, which is why the run dropped every
+   priority and type — the degradation path proving itself by
+   accident. The mint fires from `issues-triage-cron.yaml`,
+   where the credentials live, so the first upstream dispatch
+   after merge is what confirms it. Watch for the undeclared
+   `permission-issue-fields` and `permission-issue-types` inputs
+   reaching the token request; the scan's own mint shares every
+   other part of the mechanism and runs green daily.
+
+#### Settled
+
+**`Urgent` belongs to humans.** The applier refuses it and the
+prompt tells the agent to propose `High` with `escalate` set
+instead. The evidence rule behind a priority lives in the
+prompt, and a prompt is advice to an untrusted agent rather than
+a boundary — so while the agent could reach the top of the
+ladder, injected issue text had a prize worth pursuing.
+Withholding `Urgent` makes the limit enforceable rather than
+advisory, and the `escalate` flag keeps the signal without the
+write. The cost is latency on a genuine emergency, which a human
+resolves by reading the flag.
+
+**Claude and Gemini are out of scope for this path.** Both
+engines' proposal routes exist in the workflow but neither has
+run: Claude's lifts the final message out of a transcript, and
+Gemini's assumes the action's `summary` output passes the
+agent's message through verbatim. Two review rounds found two
+bugs in the Claude parser alone, in code that has never
+executed — which measures how far those paths deserve trust.
+Copilot is the engine the schedule uses and the one proven end
+to end. Treat the other two as unverified until someone runs
+them, and consider removing them if they stay unused.

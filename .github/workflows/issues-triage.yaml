@@ -31,7 +31,12 @@ on:
   workflow_call:
     inputs:
       org:
-        description: 'GitHub organisation or user to triage'
+        description: >-
+          GitHub organisation or user to triage. Live runs need
+          an organisation: they require App credentials, and the
+          apply step's token asks for organisation permissions a
+          user installation cannot grant. A user owner is
+          dry-run only (DESIGN.md 13.7).
         required: true
         type: string
       engine:
@@ -422,11 +427,15 @@ jobs:
           # The alias below is named for completeness, but flag
           # placement defeats every entry on the list and no
           # enumeration fixes that. What actually holds writes shut
-          # is the token: this engine runs with issues:read (see the
-          # mint step) and never goes live. Closing the gap properly
-          # needs the command-vetting hook in DESIGN.md section
-          # 13.4, which is a precondition for ever pairing this
-          # engine with a write-capable token.
+          # is the token: this engine's session runs with
+          # issues:read in every mode (see the mint step), and the
+          # run's own writes happen after the session ends, in the
+          # apply step, against a credential the agent never sees
+          # (DESIGN.md section 13.7). So a live run no longer waits
+          # on this list being airtight. The command-vetting hook
+          # in section 13.4 still matters, because these gaps let
+          # an auto-approved read reach the gh configuration and
+          # the CLI's environment.
           deny_cmds=('git' 'gh pr'
             'gh issue close' 'gh issue comment' 'gh issue create'
             'gh issue new'
@@ -750,6 +759,15 @@ jobs:
       # Minted for dry runs too, because validation needs the same
       # reads. The agent never sees it: its step finished before
       # this one starts.
+      #
+      # issue_fields and issue_types are organisation permissions,
+      # so this mint needs an organisation owner. A user-owned
+      # installation cannot grant them and the request fails.
+      # Pairing that with the live-run guard above, which refuses
+      # an App-less live run outright, leaves a user owner dry-run
+      # only -- as the org input says. Degrading here instead
+      # would be worse: a live run that quietly dropped every
+      # priority would look like it worked.
       - name: 'Mint App token for the apply step 🔐'
         id: app-token-write
         # yamllint disable-line rule:line-length
@@ -806,8 +824,14 @@ jobs:
           DRY_RUN: "${{ inputs.dry_run }}"
         run: |
           if [ ! -f artefacts/session-summary.md ]; then
-            echo "No agent proposal to apply"
-            exit 0
+            # The guard above already established that an agent
+            # session succeeded, so a missing proposal means the
+            # export or extraction failed rather than that the
+            # agent had nothing to say. Exiting clean here would
+            # report a live run as green having applied nothing.
+            echo "::error::An agent session completed but left no" \
+              "proposal at artefacts/session-summary.md."
+            exit 1
           fi
           extra=()
           if [ "$DRY_RUN" = "true" ]; then

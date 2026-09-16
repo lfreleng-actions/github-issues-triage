@@ -80,13 +80,11 @@ jobs:
       # events, which carry no inputs, and API dispatches that
       # omit this one.
       engine: ${{ inputs.engine || 'copilot' }}
-      # Scheduled runs are always dry-run during rollout; a manual
-      # dispatch takes the operator's choice. Pairing a live run
-      # with the copilot engine is not silently converted to a dry
-      # run here: the reusable workflow refuses that combination
-      # with an explicit error (DESIGN.md section 13.2), which
-      # tells the operator what happened rather than doing
-      # something they did not ask for.
+      # Scheduled runs stay dry during the rollout (DESIGN.md
+      # section 11); a manual dispatch takes the operator's
+      # choice. Section 13.7 moved the write out of the agent's
+      # hands, so no engine is barred from a live run any more
+      # and flipping this expression is all the rollout needs.
       dry_run: >-
         ${{ github.event_name == 'schedule' || inputs.dry_run }}
       retriage: ${{ inputs.retriage || false }}

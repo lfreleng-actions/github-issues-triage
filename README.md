@@ -198,17 +198,23 @@ leaving it unable to label.
 ## Safety model
 
 - **Dry-run by default**: consumers opt in to live labelling
-- **The agent never applies anything**: it receives read verbs of
-  `gh` and nothing else, in every mode. It emits a structured
+- **The agent never applies anything**: the tool policy grants it
+  read verbs of `gh`, in every mode. It emits a structured
   proposal, and a separate workflow step validates and applies
   it. The repository credential the session holds is an
   `issues: read` App token, so no session can label through its
-  own grant, whichever engine runs
+  own grant, whichever engine runs. On the Copilot engine that
+  policy is an approval prompt rather than a filter, and the CLI
+  auto-approves further shell reads around it — which is why the
+  credential, not the policy, carries the guarantee
 - **The applier re-checks, rather than trusting**: it verifies
-  organisation scope, the exclusion list, membership of the
-  run's own snapshot, issue versus pull request, label
-  existence, and the organisation's priority and type options.
-  It refuses to overwrite a priority a human set
+  organisation scope, the exclusion list and membership of the
+  run's own snapshot, then reads each target live for its kind,
+  state and labels rather than trusting a snapshot the session
+  has had twenty minutes to outlive. It checks label existence
+  and the organisation's priority and type options, refuses to
+  overwrite a priority a human set, and refuses `Urgent` from
+  any agent
 - **Copilot engine caveat**: that engine restricts the model to
   shell tools, denies the mutating `gh` and `git` verbs, turns
   off built-in MCP servers and custom-instruction loading, and
