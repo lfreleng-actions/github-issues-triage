@@ -49,9 +49,9 @@ the session:
 
 The workflow down-scopes the minted token further at mint time,
 and the token expires after an hour. In this organisation the
-existing bot App supplies both halves through
-`vars.LF_RELENG_BOT_CLIENT_ID` and
-`secrets.LF_RELENG_BOT_PRIVATE_KEY`.
+dedicated **LF/RelEng Issues Triage Bot** App supplies both
+halves through `vars.LF_TRIAGE_BOT_CLIENT_ID` and
+`secrets.LF_TRIAGE_BOT_PRIVATE_KEY`, held at repository level.
 
 Without App credentials the pipeline still reports: dry runs read
 issues through the caller's `github.token`. Live runs
