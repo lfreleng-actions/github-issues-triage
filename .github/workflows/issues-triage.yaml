@@ -206,25 +206,6 @@ jobs:
               default_model='claude-sonnet-5'
               key="$COPILOT_KEY"
               key_name='copilot_token'
-              # This engine's tool containment is an approval policy
-              # the CLI auto-approves around, not a filter (see
-              # DESIGN.md section 13.2), so it never applies labels.
-              # The label wrapper is out of its reach in any case:
-              # the CLI approves shell commands on their first-level
-              # stem, and granting that for the wrapper would mean
-              # granting bare 'bash'. Refuse the combination here
-              # rather than let a live session discover it.
-              #
-              # Deliberately not conditioned on skip_agent. Skipping
-              # the session changes what a run does, never which
-              # inputs it accepts, so the engine invariant holds
-              # whether or not an agent runs.
-              if [ "$DRY_RUN" != "true" ]; then
-                echo "::error::The copilot engine cannot apply" \
-                  "labels; set dry_run, or choose claude or" \
-                  "gemini for a live run."
-                exit 1
-              fi
               ;;
             *)
               echo "::error::Unknown engine '$ENGINE'; use claude," \
@@ -262,6 +243,9 @@ jobs:
       # withholding keeps the org-wide reads the scan depends on:
       # github.token is repository-scoped, so a Copilot run
       # without an App token would miss every other repository.
+      # Read-only, for the scan and the agent session. Write
+      # arrives later, in its own token, held by a step no agent
+      # can influence.
       - name: 'Mint GitHub App token 🔑'
         id: app-token
         if: inputs.github_app_client_id != ''
@@ -276,7 +260,7 @@ jobs:
           # which org-wide triage requires.
           repositories: "${{ inputs.repository }}"
           # yamllint disable-line rule:line-length
-          permission-issues: "${{ inputs.engine == 'copilot' && 'read' || 'write' }}"
+          permission-issues: 'read'
           permission-metadata: 'read'
 
       # Resolve the assets ref before checkout, guarding the
@@ -355,12 +339,11 @@ jobs:
               echo "- Restrict the scan to repository: $REPOSITORY"
             fi
             if [ "$DRY_RUN" = "true" ]; then
-              echo "- Mode: DRY RUN. Do not apply labels." \
-                "Report the labels you would apply instead."
+              echo "- Mode: DRY RUN. The proposal you emit is" \
+                "reported and discarded; nothing is written."
             else
-              echo "- Mode: live. Apply labels with" \
-                "triage-assets/scripts/apply-label.sh as the" \
-                "procedure describes."
+              echo "- Mode: live. The proposal you emit is" \
+                "validated and applied by a later step."
             fi
             if [ "$RETRIAGE" = "true" ]; then
               echo "- Retriage mode: re-examine labelled issues too."
@@ -373,34 +356,27 @@ jobs:
             cat artefacts/prompt.md
             echo "TRIAGE_PROMPT_EOF"
           } >> "$GITHUB_OUTPUT"
+          # Read verbs only, on every engine and in every mode.
+          # Agents propose; the apply step writes (DESIGN.md
+          # section 13.7), so no session needs a write grant and
+          # none is issued.
           tools="Bash(gh search issues:*),Bash(gh issue list:*)"
           tools="$tools,Bash(gh issue view:*),Bash(gh label list:*)"
-          if [ "$DRY_RUN" != "true" ]; then
-            tools="$tools,Bash(bash"
-            tools="$tools triage-assets/scripts/apply-label.sh:*)"
-          fi
           echo "tools=$tools" >> "$GITHUB_OUTPUT"
           # Gemini CLI settings: tools.core is the Gemini analogue
-          # of Claude's --allowedTools grant — the same read verbs,
-          # the same wrapper in live mode — and model.maxSessionTurns
-          # carries the turn ceiling (nested per the settings
-          # schema the pinned action documents).
-          live='false'
-          if [ "$DRY_RUN" != "true" ]; then
-            live='true'
-          fi
-          settings=$(jq -nc --argjson live "$live" \
+          # of Claude's --allowedTools grant, and
+          # model.maxSessionTurns carries the turn ceiling (nested
+          # per the settings schema the pinned action documents).
+          settings=$(jq -nc \
             --argjson turns "$MAX_TURNS" '
             {
               tools: {
-                core: ([
+                core: [
                   "run_shell_command(gh search issues)",
                   "run_shell_command(gh issue list)",
                   "run_shell_command(gh issue view)",
                   "run_shell_command(gh label list)"
-                ] + (if $live then [
-                  "run_shell_command(bash triage-assets/scripts/apply-label.sh)"
-                ] else [] end))
+                ]
               },
               model: {
                 maxSessionTurns: $turns
@@ -711,6 +687,59 @@ jobs:
           elif [ -f artefacts/session-summary.md ]; then
             echo "Session summary already present in artefacts/"
           fi
+
+      # A second, write-capable token, minted only for live runs
+      # and only after the agent session has ended. The agent
+      # never sees it: its step finished before this one starts,
+      # and the value is scoped to the apply step's environment.
+      - name: 'Mint App token for writes 🔐'
+        id: app-token-write
+        # yamllint disable-line rule:line-length
+        if: ${{ !inputs.dry_run && inputs.github_app_client_id != '' && steps.prompt.outcome == 'success' }}
+        # yamllint disable-line rule:line-length
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          client-id: "${{ inputs.github_app_client_id }}"
+          private-key: "${{ secrets.github_app_private_key }}"
+          owner: "${{ inputs.org }}"
+          repositories: "${{ inputs.repository }}"
+          permission-issues: 'write'
+          permission-metadata: 'read'
+
+      # The agent proposes; this applies. Keeping the two apart
+      # means no agent session holds a write-capable credential,
+      # so a harness whose tool containment is approval rather
+      # than enforcement (DESIGN.md section 13.2) cannot write
+      # anything regardless. Everything the agent emitted is
+      # revalidated here against the run's own scope before it
+      # reaches GitHub.
+      #
+      # This step also carries priority and type, which the agent
+      # could not set even if trusted: gh issue edit reaches
+      # neither, so both go through the REST issue-field endpoint.
+      - name: 'Apply triage proposal 🏷️'
+        id: apply
+        if: always() && steps.prompt.outcome == 'success'
+        env:
+          # yamllint disable-line rule:line-length
+          GH_TOKEN: "${{ steps.app-token-write.outputs.token || steps.app-token.outputs.token || github.token }}"
+          TRIAGE_ORG: "${{ inputs.org }}"
+          TRIAGE_REPOSITORY: "${{ inputs.repository }}"
+          TRIAGE_EXCLUDE_FILE: 'artefacts/excluded-repos.txt'
+          DRY_RUN: "${{ inputs.dry_run }}"
+        run: |
+          if [ ! -f artefacts/session-summary.md ]; then
+            echo "No agent proposal to apply"
+            exit 0
+          fi
+          extra=()
+          if [ "$DRY_RUN" = "true" ]; then
+            extra+=(--dry-run)
+          fi
+          python3 triage-assets/scripts/apply_triage.py \
+            --proposal artefacts/session-summary.md \
+            --output-json artefacts/apply-result.json \
+            "${extra[@]}"
 
       - name: 'Snapshot issues (after) 📸'
         if: always() && steps.before.outcome == 'success'
