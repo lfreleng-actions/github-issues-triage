@@ -7,8 +7,9 @@ SPDX-FileCopyrightText: 2026 The Linux Foundation
 
 The pipeline runs one agent session per run, driven by one of three
 interchangeable engines. Everything either side of that session —
-snapshots, exclusion filtering, the policy prompt, the label
-wrapper, the diff report, the artefact bundle — is engine-neutral,
+snapshots, exclusion filtering, the policy prompt, proposal
+validation and application, the diff report, the artefact
+bundle — is engine-neutral,
 so setting up an engine means providing one credential and
 choosing the `engine` input.
 

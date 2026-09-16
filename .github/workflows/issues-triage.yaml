@@ -235,17 +235,15 @@ jobs:
             "github_app_private_key secret)."
           exit 1
 
-      # The copilot engine gets a read-only token. That engine
-      # cannot label in any mode, so issues:write would buy it
-      # nothing -- while its session holds the credential in a gh
-      # configuration file that an auto-approved read can still
-      # reach (DESIGN.md section 13.2). Down-scoping rather than
-      # withholding keeps the org-wide reads the scan depends on:
-      # github.token is repository-scoped, so a Copilot run
-      # without an App token would miss every other repository.
-      # Read-only, for the scan and the agent session. Write
-      # arrives later, in its own token, held by a step no agent
-      # can influence.
+      # Read-only, for the scan and the agent session. No engine
+      # applies anything now (DESIGN.md section 13.7), so no
+      # session needs write and none is issued. Write arrives
+      # later, in its own token, held by a step no agent can
+      # influence.
+      #
+      # Passed unconditionally rather than withheld: github.token
+      # is repository-scoped, so a run without an App token would
+      # see no repository but its own.
       - name: 'Mint GitHub App token 🔑'
         id: app-token
         if: inputs.github_app_client_id != ''
@@ -459,9 +457,9 @@ jobs:
         uses: anthropics/claude-code-action@9c5ddab2e6d17b83ea679153b31f1d5f023cf636 # v1.0.217
         env:
           GH_TOKEN: "${{ steps.app-token.outputs.token || github.token }}"
-          # Enforced by apply-label.sh, independent of the prompt:
-          # targets must sit inside this org/repository scope, avoid
-          # the exclusion list, and resolve to real issues (not PRs).
+          # Read-only: the session proposes, and the apply step
+          # revalidates every proposal against this same scope
+          # before writing (DESIGN.md section 13.7).
           TRIAGE_ORG: "${{ inputs.org }}"
           TRIAGE_REPOSITORY: "${{ inputs.repository }}"
           TRIAGE_EXCLUDE_FILE: 'artefacts/excluded-repos.txt'
@@ -633,7 +631,9 @@ jobs:
           prompt="$(cat artefacts/prompt.md)"
           # --disable-builtin-mcps removes the bundled GitHub MCP
           #   server, whose label_write tool would otherwise offer a
-          #   route around apply-label.sh
+          #   server, whose label_write tool would otherwise write
+          #   labels directly, bypassing the validation the apply
+          #   step performs
           # --no-custom-instructions stops AGENTS.md and friends in
           #   the assets checkout from steering the session
           # --no-ask-user keeps the session autonomous; without it a

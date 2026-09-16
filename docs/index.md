@@ -13,8 +13,9 @@ evidence to the workflow run.
 ## Three engines, one pipeline
 
 The agent session is the single provider-specific step. Snapshots,
-exclusion filtering, the policy prompt, the label wrapper, the diff
-report, and the artefact bundle stay the same whichever engine runs:
+exclusion filtering, the policy prompt, proposal validation and
+application, the diff report, and the artefact bundle stay the
+same whichever engine runs:
 
 <!-- markdownlint-disable MD013 -->
 
@@ -62,12 +63,13 @@ it never applied shows up as a difference between the two snapshots.
 ## Safety model in brief
 
 Dry-run is the default: consumers opt in to live labelling. The
-agent receives read verbs of `gh` plus, in live mode, a
-constrained wrapper that validates repository, issue number, and
-label existence before a fixed `--add-label` operation. Every
-label write travels over the GitHub App token, which stays
-separate from the model credential; the Anthropic and Gemini keys
-carry no GitHub permissions at all. Issue text counts as data,
+agent receives read verbs of `gh` and nothing else, in every
+mode; it proposes, and a separate workflow step validates each
+proposal and performs the writes. So no agent session holds a
+write-capable token. Every write travels over the GitHub App
+token, which stays separate from the model credential; the
+Anthropic and Gemini keys carry no GitHub permissions at all.
+Issue text counts as data,
 never instructions.
 
 Containment differs by engine, so the worst case does too. The

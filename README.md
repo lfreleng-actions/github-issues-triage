@@ -195,10 +195,16 @@ leaving it unable to label.
 ## Safety model
 
 - **Dry-run by default**: consumers opt in to live labelling
-- **Tool containment**: the agent receives read verbs of `gh` plus,
-  in live mode, a constrained wrapper that validates repository,
-  issue number, and label existence before a fixed `--add-label`
-  operation — no `gh issue edit`, no `git`, no arbitrary shell
+- **The agent never writes**: it receives read verbs of `gh` and
+  nothing else, in every mode. It emits a structured proposal,
+  and a separate workflow step validates and applies it — so no
+  agent session holds a write-capable token, whichever engine
+  runs
+- **The applier re-checks, rather than trusting**: it verifies
+  organisation scope, the exclusion list, membership of the
+  run's own snapshot, issue versus pull request, label
+  existence, and the organisation's priority and type options.
+  It refuses to overwrite a priority a human set
 - **Copilot engine caveat**: that engine restricts the model to
   shell tools, denies the mutating `gh` and `git` verbs, turns
   off built-in MCP servers and custom-instruction loading, and

@@ -671,10 +671,8 @@ CLI non-interactively against a `prompt` input — the same shape as
 
 The tool containment translates directly: the Gemini CLI's
 `tools.core` allow-list grants specific shell commands, so the
-Gemini session receives the same read verbs plus the same
-constrained `apply-label.sh` wrapper in live mode — the wrapper's
-scope/exclusion/PR-rejection enforcement is engine-independent by
-design.
+Gemini session receives the same read verbs as the others. Since
+§13.7 it receives nothing beyond them, in any mode.
 
 ### 12.3 Authentication
 
@@ -917,8 +915,8 @@ Containment notes specific to this engine:
   redaction follows values rather than intent.
 - **Built-in MCP servers, disabled.** Copilot CLI ships a GitHub
   MCP server enabled by default, whose `label_write` tool would
-  apply labels without passing through `apply-label.sh` — around
-  the wrapper's scope, exclusion, and pull-request checks.
+  write labels directly, bypassing the validation the apply step
+  performs (§13.7).
   `--disable-builtin-mcps` closes that route. Neither of the other
   two engines ships such a server, so this hardening has no
   analogue there.
@@ -1049,13 +1047,12 @@ Remaining:
    landed as the seeded `gh` configuration directory (§13.2),
    though §13.2 also records why that buys less than it looks
    like; the remaining half is vetting the commands themselves
-2. **Second precondition for live use** — a route to the label
-   wrapper. The CLI approves shell commands on their first-level
-   stem, so `shell(bash triage-assets/scripts/apply-label.sh:*)`
-   matches nothing, and the workable grant would be bare `bash`.
-   A run confirmed the fix: install the wrapper as an executable
-   on `PATH` under its own name, which `shell(<name>:*)` then
-   grants and nothing more
+2. ~~**Second precondition for live use** — a route to the label
+   wrapper.~~ Settled by §13.7: the agent no longer applies
+   anything, so it needs no route to a wrapper. Recorded because
+   the finding still holds — the CLI approves shell commands on
+   their first-level stem, so a wrapper grant would have meant
+   granting bare `bash`
 3. Cost telemetry: `load_transcript_stats` parses a Claude-shaped
    execution log; map the Copilot CLI's log fields so the report
    carries turns and spend for this engine too (defensive parsing
@@ -1212,3 +1209,104 @@ verification question first, before anyone writes either.
 
 The repository-access tokens have no such blocker:
 `permission-issues` already exists and the workflow uses it.
+
+### 13.7 Proposing and applying, split apart
+
+**Status:** implemented. Supersedes the live-mode label wrapper
+for every engine.
+
+Until now the agent applied labels itself, through
+`apply-label.sh`. That required handing an agent session a
+write-capable token, which §13.2 showed was unsafe on the
+Copilot engine: its tool containment is an approval policy the
+CLI auto-approves around, deny rules fall to flag placement, and
+an auto-approved read reaches the parent process environment.
+The workflow refused live runs on that engine as a result — and
+since §13.6 moved the schedule onto it, scheduled triage could
+not label anything at all.
+
+The fix is not to harden the agent's write path but to remove
+it. **The agent proposes; a deterministic step applies.**
+
+#### How it fits together
+
+The agent ends its message with one fenced `json` block naming
+the repository, issue, labels, priority and type for each
+proposal, plus the issues it skipped and any injection attempt
+it noticed. `scripts/apply_triage.py` reads that block and
+treats it as untrusted input, revalidating every claim against
+the run's own configuration before anything reaches GitHub.
+
+<!-- markdownlint-disable MD013 -->
+
+| Check | Answers |
+| ----- | ------- |
+| organisation, single-repository restriction, exclusion list | may this run touch that repository at all? |
+| membership of the run's own snapshot | did this run's scan actually see this issue? |
+| snapshot labels against retriage mode | was this issue in scope, or passed over on purpose? |
+| issue rather than pull request | is the target the kind of thing triage labels? |
+| label exists in that repository | can this label go on without inventing it? |
+| priority and type against the organisation's definitions | do these options exist here? |
+| no priority set already | has a human claimed this issue? |
+
+<!-- markdownlint-enable MD013 -->
+
+The snapshot check is the one that does unobvious work. Without
+it the trust boundary is "any issue in an allowed repository",
+when it should be "the issues this run scanned" — and those
+differ by the population the scan excluded on purpose.
+
+#### What this buys
+
+- **No agent session holds write, on any engine.** A harness's
+  containment properties stop deciding whether triage can run,
+  which removes the reason §13.2's gap blocked live use.
+- **Issue fields become reachable.** `gh issue edit` sets
+  neither priority nor type, so both need the REST issue-field
+  endpoint — something the agent's three-command grant could
+  never have covered, trusted or not.
+- **`dry_run` stops depending on the agent.** It gates a
+  workflow step rather than asking the agent to honour a mode,
+  so a confused or prompt-injected session cannot write by
+  ignoring its instructions.
+
+#### Tokens
+
+Two, one per role, as §13.6 describes. The scan and the agent
+read through an `issues: read` token. Writes use a second token
+minted **after** the session ends, for live runs alone, so the
+agent's step has finished before the write credential exists.
+
+#### Consequences
+
+This change deletes `apply-label.sh`. No engine receives a grant
+for it, because none applies anything, and its checks now live
+in the applier, where they run against every proposal rather
+than the subset the agent chose to route through the wrapper.
+
+The agent's tool grant is the same read verbs in every mode.
+Live runs used to widen it; now there is nothing to widen.
+
+What this does **not** fix is §13.2's underlying gap. An
+auto-approved read still reaches the agent's `gh` configuration
+and the CLI's own environment, so the `preToolUse` hook in
+§13.4 remains worth building. The split bounds the damage to
+reads rather than closing the hole.
+
+#### Open questions
+
+1. **Claude's proposal path lacks a test.** That action exposes
+   a transcript rather than a shared summary, so a parser lifts
+   the final message out of `execution_file` — and no run has
+   exercised it. Its failure mode is silent: no proposal file,
+   and the apply step skips.
+2. **Gemini's lacks one too, and rests on a weaker assumption.**
+   This design assumes the engine's `summary` output carries the
+   agent's final message verbatim. If the action summarises
+   rather than passes through, the fenced block will not
+   survive. Confirm before relying on that engine.
+3. **Whether the applier should report rather than reject.** A
+   rejected proposal amounts to a line in the run's JSON. For a
+   long-running schedule it may be worth surfacing repeated
+   rejections, which would point at prompt drift rather than
+   individual bad proposals.
