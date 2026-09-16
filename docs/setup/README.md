@@ -40,7 +40,7 @@ the session:
 
 | Setting | Value |
 | ------- | ----- |
-| App permissions | `issues: write`, `metadata: read` — nothing else |
+| App permissions | `issues: write` and `metadata: read` on repositories; `issue_fields: read` and `issue_types: read` on the organisation |
 | Installation | Every repository in the target organisation |
 | Client id | Passed as the `github_app_client_id` input |
 | Private key | Passed as the `github_app_private_key` secret |
