@@ -8,20 +8,15 @@ agent session ever holds a write-capable credential, so the
 containment weaknesses of any particular harness stop mattering
 for writes (see DESIGN.md section 13.2).
 
-Everything the agent says is treated as untrusted input. A
-proposal reaches GitHub only if it survives every check here:
-
-* the repository sits inside the run's organisation, matches the
-  single-repository restriction when one is set, and is absent
-  from the exclusion list;
-* the target is an issue, not a pull request;
-* each label already exists in that repository;
-* priority and type name options the organisation defines;
-* the issue carries no priority a human set already.
-
-Labels travel through ``gh``. Priority and type travel through
-the REST issue-field endpoints, which ``gh issue edit`` cannot
-reach.
+Everything the agent says is untrusted input. A proposal reaches
+GitHub only if it survives every check here: the repository sits
+inside the run's organisation, matches the single-repository
+restriction and avoids the exclusion list; the issue appeared in
+this run's own snapshot, so a proposal cannot reach an issue the
+scan never saw; the target is an issue rather than a pull
+request; each label already exists in that repository; priority
+and type name options the organisation defines; and no human has
+set a priority already.
 
 Usage:
     apply_triage.py --proposal <file> --snapshot <before.json>
@@ -32,6 +27,7 @@ Environment:
     TRIAGE_ORG           (required) owner every target must match
     TRIAGE_REPOSITORY    restrict targets to this repository name
     TRIAGE_EXCLUDE_FILE  file of excluded repository names
+    TRIAGE_RETRIAGE      'true' when labelled issues are in scope
 """
 
 from __future__ import annotations
@@ -40,35 +36,47 @@ import argparse
 import json
 import os
 import re
-import subprocess
 import sys
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, cast
 
+from triage_github import (
+    Rejected,
+    apply,
+    check_target,
+    existing_priority,
+    load_field_options,
+    load_issue_types,
+    repo_labels,
+)
+
 PRIORITIES = ("Urgent", "High", "Medium", "Low")
-TYPES = ("Task", "Bug", "Feature")
-# Reserved key holding a field's own id alongside its option ids.
-# Option names come from the organisation's field definitions and
-# never take this shape, so no collision is possible.
-FIELD_ID_KEY = "__field_id__"
 REPO_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*/[A-Za-z0-9._-]+$")
 MAX_LABELS = 2
 # The agent emits one fenced json block; prose around it is for
-# humans. Take the last block that parses and carries the key,
-# so a worked example earlier in the message cannot win.
+# humans. Take the last block that parses and carries the key, so
+# a worked example earlier in the message cannot win.
 FENCE_RE = re.compile(r"```json\s*\n(.*?)\n```", re.DOTALL)
 
 
-class Rejected(Exception):
-    """A proposal failed validation and will not be applied."""
+@dataclass
+class Context:
+    """Everything a proposal is checked against.
 
+    Gathered once so validation takes the proposal and the run,
+    rather than a long tail of positional arguments that invite
+    being passed in the wrong order.
+    """
 
-def run_gh(args: list[str]) -> str:
-    """Run a gh command, returning stdout and raising on failure."""
-    proc = subprocess.run(["gh", *args], capture_output=True, text=True, check=False)
-    if proc.returncode != 0:
-        raise Rejected(proc.stderr.strip() or f"gh {' '.join(args)} failed")
-    return proc.stdout
+    org: str
+    only: str | None
+    excluded: set[str]
+    retriage: bool
+    fields: dict[str, dict[str, int]]
+    types: set[str]
+    snapshot: dict[tuple[str, int], frozenset[str]]
+    label_cache: dict[str, set[str]] = field(default_factory=dict)
 
 
 def extract_proposal(text: str) -> dict[str, Any]:
@@ -91,122 +99,105 @@ def load_exclusions(path: str | None) -> set[str]:
     return {line.strip().lower() for line in lines if line.strip()}
 
 
-def load_field_options(org: str) -> dict[str, dict[str, int]]:
-    """Map each org issue field to its option names and ids.
+def load_snapshot(path: Path) -> dict[tuple[str, int], frozenset[str]]:
+    """Index the run's snapshot by target, carrying its labels.
 
-    Both the field id and its option ids are integers the
-    issue-field-values endpoint expects, so one dict carries both
-    and saves a second lookup at apply time.
+    Membership answers "did this run's scan actually see this
+    issue", which bounds an untrusted proposal to the population
+    the scan covered rather than every issue in the organisation.
     """
-    raw = run_gh(["api", f"orgs/{org}/issue-fields"])
-    data: list[dict[str, Any]] = json.loads(raw)
-    fields: dict[str, dict[str, int]] = {}
-    for field in data:
-        options: list[dict[str, Any]] = field.get("options") or []
-        entry = {str(option["name"]): int(option["id"]) for option in options}
-        entry[FIELD_ID_KEY] = int(field["id"])
-        fields[str(field["name"])] = entry
-    return fields
+    entries: list[dict[str, Any]] = json.loads(path.read_text(encoding="utf-8"))
+    index: dict[tuple[str, int], frozenset[str]] = {}
+    for entry in entries:
+        repository: dict[str, Any] = entry.get("repository") or {}
+        full_name = str(repository.get("nameWithOwner", ""))
+        labels: list[dict[str, Any]] = entry.get("labels") or []
+        index[(full_name.lower(), int(entry["number"]))] = frozenset(
+            str(label["name"]) for label in labels
+        )
+    return index
 
 
-def check_scope(repo: str, org: str, only: str | None, excluded: set[str]) -> None:
+def check_scope(repo: str, ctx: Context) -> None:
     """Refuse targets outside the run's declared scope."""
     if not REPO_RE.match(repo):
         raise Rejected(f"repository fails validation: {repo}")
     owner, _, name = repo.partition("/")
-    if owner.lower() != org.lower():
-        raise Rejected(f"repository outside triage scope ({org}): {repo}")
-    if only and name.lower() != only.lower():
-        raise Rejected(f"run restricted to {org}/{only}: {repo}")
-    if name.lower() in excluded:
+    if owner.lower() != ctx.org.lower():
+        raise Rejected(f"repository outside triage scope ({ctx.org}): {repo}")
+    if ctx.only and name.lower() != ctx.only.lower():
+        raise Rejected(f"run restricted to {ctx.org}/{ctx.only}: {repo}")
+    if name.lower() in ctx.excluded:
         raise Rejected(f"repository is excluded from triage: {repo}")
 
 
-def check_target(repo: str, number: int) -> None:
-    """Confirm the target exists and is an issue, not a pull request."""
-    raw = run_gh(
-        [
-            "api",
-            f"repos/{repo}/issues/{number}",
-            "--jq",
-            'if .pull_request then "pull-request" else "issue" end',
-        ]
-    )
-    if raw.strip() != "issue":
-        raise Rejected(f"target is a pull request, not an issue: {repo}#{number}")
+def check_labels(repo: str, item: dict[str, Any], ctx: Context) -> list[str]:
+    """Validate the proposed labels against the repository's own."""
+    raw: Any = item.get("labels") or []
+    if not isinstance(raw, list) or not all(
+        isinstance(name, str) for name in cast("list[Any]", raw)
+    ):
+        raise Rejected("labels must be a list of strings")
+    labels = cast("list[str]", raw)
+    if len(labels) > MAX_LABELS:
+        raise Rejected(f"at most {MAX_LABELS} labels per issue")
+    known = repo_labels(repo, ctx.label_cache)
+    for name in labels:
+        if name not in known:
+            raise Rejected(f"label does not exist in {repo}: {name}")
+    return labels
 
 
-def existing_priority(repo: str, number: int) -> str | None:
-    """Return the priority already set on an issue, if any."""
-    raw = run_gh(["api", f"repos/{repo}/issues/{number}/issue-field-values"])
-    values: list[dict[str, Any]] = json.loads(raw)
-    for value in values:
-        if value.get("issue_field_name") == "Priority":
-            option: dict[str, Any] = value.get("single_select_option") or {}
-            name = option.get("name")
-            return str(name) if name is not None else None
-    return None
-
-
-def repo_labels(repo: str, cache: dict[str, set[str]]) -> set[str]:
-    """List a repository's labels, once per repository."""
-    if repo not in cache:
-        raw = run_gh(
-            ["label", "list", "--repo", repo, "--limit", "200", "--json", "name"]
-        )
-        entries: list[dict[str, Any]] = json.loads(raw)
-        cache[repo] = {str(entry["name"]) for entry in entries}
-    return cache[repo]
-
-
-def validate(
-    item: dict[str, Any],
-    org: str,
-    only: str | None,
-    excluded: set[str],
-    label_cache: dict[str, set[str]],
-    fields: dict[str, dict[str, int]],
-) -> dict[str, Any]:
+def validate(item: dict[str, Any], ctx: Context) -> dict[str, Any]:
     """Check one proposal, returning the actions it authorises."""
     repo = str(item.get("repository", ""))
     number = item.get("issue")
     if not isinstance(number, int):
         raise Rejected(f"issue number is not an integer: {number!r}")
 
-    check_scope(repo, org, only, excluded)
-    check_target(repo, number)
+    check_scope(repo, ctx)
 
-    raw_labels: Any = item.get("labels") or []
-    if not isinstance(raw_labels, list) or not all(
-        isinstance(name, str) for name in cast("list[Any]", raw_labels)
-    ):
-        raise Rejected("labels must be a list of strings")
-    labels = cast("list[str]", raw_labels)
-    if len(labels) > MAX_LABELS:
-        raise Rejected(f"at most {MAX_LABELS} labels per issue")
-    known = repo_labels(repo, label_cache)
-    for name in labels:
-        if name not in known:
-            raise Rejected(f"label does not exist in {repo}: {name}")
+    # Bound the proposal to what this run's scan actually saw.
+    # Without this, an agent could name any issue in an allowed
+    # repository, including ones the scan deliberately passed over.
+    key = (repo.lower(), number)
+    if key not in ctx.snapshot:
+        raise Rejected(f"{repo}#{number} is absent from this run's snapshot")
+    snapshot_labels = ctx.snapshot[key]
+    if snapshot_labels and not ctx.retriage:
+        raise Rejected(f"{repo}#{number} already carries labels; not retriaging")
+
+    check_target(repo, number)
+    labels = check_labels(repo, item, ctx)
+
+    # Checked whatever the agent proposed, including nothing: a
+    # human-set priority takes the whole issue out of scope, so an
+    # omitted priority must not become a way to relabel it.
+    current = existing_priority(repo, number)
+    if current is not None:
+        raise Rejected(f"priority already set to {current}; leaving it")
 
     priority = item.get("priority")
     if priority is not None:
         if priority not in PRIORITIES:
             raise Rejected(f"unknown priority: {priority!r}")
-        # A human triager outranks the agent, exactly as for labels.
-        current = existing_priority(repo, number)
-        if current is not None:
-            raise Rejected(f"priority already set to {current}; leaving it")
+        if "Priority" not in ctx.fields:
+            raise Rejected("organisation defines no Priority field")
+        if priority not in ctx.fields["Priority"]:
+            raise Rejected(f"organisation defines no Priority option: {priority}")
 
     issue_type = item.get("type")
-    if issue_type is not None and issue_type not in TYPES:
-        raise Rejected(f"unknown issue type: {issue_type!r}")
+    if issue_type is not None and issue_type not in ctx.types:
+        raise Rejected(f"organisation defines no issue type: {issue_type!r}")
 
-    if item.get("migrate_enhancement") and "enhancement" not in known:
-        raise Rejected(f"{repo} has no 'enhancement' label to migrate")
-
-    if "Priority" not in fields and priority is not None:
-        raise Rejected("organisation defines no Priority field")
+    migrate = item.get("migrate_enhancement", False)
+    if not isinstance(migrate, bool):
+        raise Rejected(f"migrate_enhancement must be a boolean: {migrate!r}")
+    if migrate:
+        if "enhancement" not in snapshot_labels:
+            raise Rejected(f"{repo}#{number} does not carry 'enhancement'")
+        if "feature" not in repo_labels(repo, ctx.label_cache):
+            raise Rejected(f"{repo} has no 'feature' label to migrate to")
 
     return {
         "repository": repo,
@@ -214,104 +205,44 @@ def validate(
         "labels": labels,
         "priority": priority,
         "type": issue_type,
-        "migrate_enhancement": bool(item.get("migrate_enhancement")),
+        "migrate_enhancement": migrate,
         "rationale": str(item.get("rationale", "")),
     }
 
 
-def apply(action: dict[str, Any], fields: dict[str, dict[str, int]]) -> None:
-    """Perform one validated action against GitHub."""
-    repo = action["repository"]
-    number = str(action["issue"])
-
-    if action["migrate_enhancement"]:
-        run_gh(
-            [
-                "issue",
-                "edit",
-                number,
-                "--repo",
-                repo,
-                "--remove-label",
-                "enhancement",
-                "--add-label",
-                "feature",
-            ]
-        )
-    if action["labels"]:
-        run_gh(
-            [
-                "issue",
-                "edit",
-                number,
-                "--repo",
-                repo,
-                "--add-label",
-                ",".join(action["labels"]),
-            ]
-        )
-    if action["type"]:
-        run_gh(["issue", "edit", number, "--repo", repo, "--type", action["type"]])
-    if action["priority"]:
-        priority_field = fields["Priority"]
-        payload = json.dumps(
-            {
-                "issue_field_values": [
-                    {
-                        "field_id": priority_field[FIELD_ID_KEY],
-                        "value": priority_field[action["priority"]],
-                    }
-                ]
-            }
-        )
-        put_fields(repo, number, payload)
-
-
-def put_fields(repo: str, number: str, payload: str) -> None:
-    """PUT issue field values, passing the body on stdin.
-
-    ``gh issue edit`` cannot set issue fields, so priority goes
-    through the REST endpoint directly.
-    """
-    proc = subprocess.run(
-        [
-            "gh",
-            "api",
-            "--method",
-            "PUT",
-            f"repos/{repo}/issues/{number}/issue-field-values",
-            "--input",
-            "-",
-        ],
-        input=payload,
-        capture_output=True,
-        text=True,
-        check=False,
+def build_context(snapshot: dict[tuple[str, int], frozenset[str]]) -> Context:
+    """Assemble the run's configuration from the environment."""
+    org = os.environ.get("TRIAGE_ORG", "")
+    if not org:
+        sys.exit("TRIAGE_ORG is not set")
+    return Context(
+        org=org,
+        only=os.environ.get("TRIAGE_REPOSITORY") or None,
+        excluded=load_exclusions(os.environ.get("TRIAGE_EXCLUDE_FILE")),
+        retriage=os.environ.get("TRIAGE_RETRIAGE", "") == "true",
+        fields=load_field_options(org),
+        types=load_issue_types(org),
+        snapshot=snapshot,
     )
-    if proc.returncode != 0:
-        raise Rejected(proc.stderr.strip() or "setting issue fields failed")
 
 
 def main() -> None:
     """Validate every proposal, then apply those that survive."""
-    parser = argparse.ArgumentParser(description=__doc__)
+    parser = argparse.ArgumentParser(description="Apply a triage proposal")
     parser.add_argument("--proposal", type=Path, required=True)
+    parser.add_argument("--snapshot", type=Path, required=True)
     parser.add_argument("--output-json", type=Path, required=True)
     parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args()
 
-    org = os.environ.get("TRIAGE_ORG", "")
-    if not org:
-        sys.exit("TRIAGE_ORG is not set")
-    only = os.environ.get("TRIAGE_REPOSITORY") or None
-    excluded = load_exclusions(os.environ.get("TRIAGE_EXCLUDE_FILE"))
-
     if not args.proposal.is_file():
         sys.exit(f"no proposal file at {args.proposal}")
-    proposal = extract_proposal(args.proposal.read_text(encoding="utf-8"))
+    if not args.snapshot.is_file():
+        sys.exit(f"no snapshot file at {args.snapshot}")
 
-    fields = load_field_options(org)
-    label_cache: dict[str, set[str]] = {}
+    proposal = extract_proposal(args.proposal.read_text(encoding="utf-8"))
+    ctx = build_context(load_snapshot(args.snapshot))
+
     applied: list[dict[str, Any]] = []
     rejected: list[dict[str, Any]] = []
     items: list[Any] = proposal.get("proposals") or []
@@ -322,7 +253,9 @@ def main() -> None:
             continue
         entry = cast("dict[str, Any]", item)
         try:
-            action = validate(entry, org, only, excluded, label_cache, fields)
+            action = validate(entry, ctx)
+            if not args.dry_run:
+                apply(action, ctx.fields)
         except Rejected as exc:
             rejected.append(
                 {
@@ -332,18 +265,6 @@ def main() -> None:
                 }
             )
             continue
-        if not args.dry_run:
-            try:
-                apply(action, fields)
-            except Rejected as exc:
-                rejected.append(
-                    {
-                        "repository": action["repository"],
-                        "issue": action["issue"],
-                        "reason": f"apply failed: {exc}",
-                    }
-                )
-                continue
         applied.append(action)
 
     counts = {

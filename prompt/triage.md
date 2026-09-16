@@ -82,10 +82,17 @@ than a wrong write.
 ## Procedure
 
 1. List open issues across the target organisation in a single
-   call: `gh search issues --owner <org> --state open`, requesting
-   the repository, number, title, and label fields as JSON. One
-   call for the whole estate; do not page through it repository
-   by repository.
+   call, matching the limit the workflow's own snapshot uses:
+
+   ```text
+   gh search issues --owner <org> --state open --limit 1000 \
+     --json repository,number,title,labels
+   ```
+
+   The default limit is 30, which would hide most of an estate
+   while the run still reported outstanding work. One call for
+   the whole estate; do not page through it repository by
+   repository.
 2. Drop issues in excluded repositories (see the runtime context).
 3. Drop issues that carry labels, unless in retriage mode.
 4. Group the remaining issues **by repository** and work through

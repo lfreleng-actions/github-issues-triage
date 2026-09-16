@@ -673,6 +673,43 @@ jobs:
           if [ -n "$EXECUTION_FILE" ] && [ -f "$EXECUTION_FILE" ]; then
             cp "$EXECUTION_FILE" artefacts/session-transcript.json
             echo "Transcript preserved from: $EXECUTION_FILE"
+            # Claude's action exposes a transcript, never a shared
+            # summary, so the proposal has to be lifted out of it
+            # or the apply step would find nothing and skip every
+            # Claude run in silence.
+            python3 - "$EXECUTION_FILE" <<'EXTRACT'
+          import json, sys, pathlib
+
+          final = ""
+          for line in pathlib.Path(sys.argv[1]).read_text(
+              encoding="utf-8", errors="replace"
+          ).splitlines():
+              try:
+                  event = json.loads(line)
+              except json.JSONDecodeError:
+                  continue
+              if not isinstance(event, dict):
+                  continue
+              if isinstance(event.get("result"), str):
+                  final = event["result"]
+                  continue
+              message = event.get("message")
+              if event.get("type") == "assistant" and isinstance(message, dict):
+                  for block in message.get("content") or []:
+                      if (
+                          isinstance(block, dict)
+                          and block.get("type") == "text"
+                          and isinstance(block.get("text"), str)
+                      ):
+                          final = block["text"]
+          if final:
+              pathlib.Path("artefacts/session-summary.md").write_text(
+                  final, encoding="utf-8"
+              )
+              print("Claude final message captured for the apply step")
+          else:
+              print("No final Claude message found in the transcript")
+          EXTRACT
           elif [ -f artefacts/gemini-telemetry.json ]; then
             echo "Gemini telemetry captured in artefacts/"
           elif [ -d artefacts/copilot-logs ]; then
@@ -726,6 +763,7 @@ jobs:
           TRIAGE_ORG: "${{ inputs.org }}"
           TRIAGE_REPOSITORY: "${{ inputs.repository }}"
           TRIAGE_EXCLUDE_FILE: 'artefacts/excluded-repos.txt'
+          TRIAGE_RETRIAGE: "${{ inputs.retriage }}"
           DRY_RUN: "${{ inputs.dry_run }}"
         run: |
           if [ ! -f artefacts/session-summary.md ]; then
@@ -738,6 +776,7 @@ jobs:
           fi
           python3 triage-assets/scripts/apply_triage.py \
             --proposal artefacts/session-summary.md \
+            --snapshot artefacts/before.json \
             --output-json artefacts/apply-result.json \
             "${extra[@]}"
 
