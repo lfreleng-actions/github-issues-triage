@@ -65,11 +65,12 @@ it never applied shows up as a difference between the two snapshots.
 Dry-run is the default: consumers opt in to live labelling. The
 agent receives read verbs of `gh` and nothing else, in every
 mode; it proposes, and a separate workflow step validates each
-proposal and performs the writes. So no agent session holds a
-write-capable token. Every write travels over the GitHub App
-token, which stays separate from the model credential; the
-Anthropic and Gemini keys carry no GitHub permissions at all.
-Issue text counts as data,
+proposal and performs the writes. The repository credential the
+session holds is an `issues: read` App token, so it cannot label
+through its own grant. Every write travels over a second App
+token minted after the session ends, separate from the model
+credential; the Anthropic and Gemini keys carry no GitHub
+permissions at all. Issue text counts as data,
 never instructions.
 
 Containment differs by engine, so the worst case does too. The
@@ -77,6 +78,7 @@ Claude and Gemini engines hold the agent to a tool allow-list the
 harness enforces, and a mislabelled issue is the ceiling. The
 Copilot engine's allow-list is an approval policy rather than a
 filter, and one of its routes reuses the calling job's
-`GITHUB_TOKEN`, so the workflow refuses a live run on that engine
-until the enforcement in
-[Design §13.4](development/DESIGN.md) lands.
+`GITHUB_TOKEN`. That bounds what the *session* can reach; a
+separate bound governs what gets written, because no engine
+applies anything itself — see
+[Design §13.7](development/DESIGN.md).

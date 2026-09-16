@@ -19,14 +19,10 @@
 # dispatch picks any of the three; per-engine credentials and
 # their setup live in docs/setup/.
 #
-# The consequence is that scheduled triage reports and never
-# labels: the reusable workflow refuses live runs on this engine,
-# and down-scopes its App token to issues:read, until the
-# command-level enforcement in DESIGN.md section 13.4 lands. A
-# dispatch pairing this engine with a live run fails with that
-# refusal rather than being quietly downgraded. Switching this
-# back to 'claude' is the one-line fix if the wait proves too
-# long.
+# The engine proposes and never applies: a later step validates
+# the proposal and performs the writes (DESIGN.md section 13.7),
+# so this engine's containment gap bounds what the session can
+# read rather than what the run can change.
 name: 'Issues Triage ⏰'
 
 # yamllint disable-line rule:truthy

@@ -13,7 +13,9 @@ SPDX-FileCopyrightText: 2026 The Linux Foundation
 Scheduled AI triage of GitHub issues. A reusable workflow scans an
 organisation's open issues, runs an agent session — **Claude Code,
 the Gemini CLI, or the GitHub Copilot CLI**, selected per run —
-that applies category labels per a versioned policy prompt, and
+that proposes category labels, priority and type per a versioned
+policy prompt, which a deterministic step then validates and
+applies, and
 attaches full run evidence to the workflow run: before/after
 snapshots, engine-specific session evidence (Claude: a
 turn-by-turn transcript; Gemini: telemetry plus the session
@@ -39,11 +41,12 @@ snapshot (before) -> agent session -> snapshot (after)
 
 1. Capture the organisation's open-issue state as JSON
 2. Skip the agent session when zero unlabelled issues exist
-3. Run the selected engine with read/label `gh` verbs and a policy
+3. Run the selected engine with read `gh` verbs and a policy
    prompt ([`prompt/triage.md`](prompt/triage.md))
-4. Capture the state again, diff, and report observed label
+4. Check the agent's proposal and apply what survives
+5. Capture the state again, diff, and report observed label
    movement — never the agent's own claims — to the step summary
-5. Upload the artefact bundle (snapshots, transcript, prompt,
+6. Upload the artefact bundle (snapshots, transcript, prompt,
    report) with 90-day retention, even when the session fails
 
 ## Consuming the reusable workflow
@@ -83,9 +86,9 @@ checkout defaults to the called workflow's own commit.
 
 > [!WARNING]
 > The Copilot engine holds a weaker containment boundary than the
-> other two — see the safety model below and design doc §13.2. It
-> never applies labels: pairing it with `dry_run: false` fails
-> the run before the session starts.
+> other two — see the safety model below and design doc §13.2.
+> That boundary governs what the *session* can reach, not what
+> gets written: no engine applies anything itself (§13.7).
 
 The `copilot` engine needs no model API key. Grant the calling
 job `copilot-requests: write` and hand its `GITHUB_TOKEN` to the
@@ -155,7 +158,7 @@ leaving it unable to label.
 | Input | Default | Purpose |
 | ----- | ------- | ------- |
 | `org` | (required) | GitHub organisation or user to triage |
-| `engine` | `claude` | Agent engine: `claude`, `gemini`, or `copilot` (refuses live runs) |
+| `engine` | `claude` | Agent engine: `claude`, `gemini`, or `copilot` |
 | `model` | engine default | `claude-opus-5` / `gemini-3.5-flash-lite` / `claude-sonnet-5` |
 | `dry_run` | `true` | Report intended labels; apply nothing |
 | `retriage` | `false` | Re-examine issues that carry labels |
@@ -195,11 +198,12 @@ leaving it unable to label.
 ## Safety model
 
 - **Dry-run by default**: consumers opt in to live labelling
-- **The agent never writes**: it receives read verbs of `gh` and
-  nothing else, in every mode. It emits a structured proposal,
-  and a separate workflow step validates and applies it — so no
-  agent session holds a write-capable token, whichever engine
-  runs
+- **The agent never applies anything**: it receives read verbs of
+  `gh` and nothing else, in every mode. It emits a structured
+  proposal, and a separate workflow step validates and applies
+  it. The repository credential the session holds is an
+  `issues: read` App token, so no session can label through its
+  own grant, whichever engine runs
 - **The applier re-checks, rather than trusting**: it verifies
   organisation scope, the exclusion list, membership of the
   run's own snapshot, issue versus pull request, label
@@ -215,12 +219,15 @@ leaving it unable to label.
   commands run unsandboxed as the same user, so one can reach the
   configuration file, or the CLI's own environment a process up.
   Value-based redaction is what protects the token there, and a
-  command that encodes the value defeats it. Writes stay shut,
-  and the workflow refuses live runs on this engine until the
-  enforcement in design doc §13.4 lands
-- **Token scope**: App tokens carry `metadata: read` plus
-  `issues: write`, or `issues: read` on the `copilot` engine,
-  which cannot label. Down-scoped at mint time, expiring in an
+  command that encodes the value defeats it. Writes stay shut
+  because the session holds no write grant and applies nothing;
+  the enforcement in design doc §13.4 would close the read gap
+  that remains
+- **Token scope**: the session's App token carries
+  `issues: read` and `metadata: read`. Writes use a second token
+  minted after the session ends, carrying `issues: write` on live
+  runs and `issues: read` on dry runs. Down-scoped at mint time,
+  expiring in an
   hour. The model credential is never the *repository-access*
   token this pipeline mints: the Anthropic and Gemini keys carry
   no GitHub permissions at all, and a Copilot PAT scoped to

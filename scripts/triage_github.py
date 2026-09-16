@@ -27,21 +27,38 @@ class Rejected(Exception):
     """A proposal failed validation and will not be applied."""
 
 
+class GitHubError(Exception):
+    """A call to GitHub failed.
+
+    Distinct from ``Rejected`` because the two mean opposite
+    things: a rejection is the applier working correctly, while
+    this is the applier unable to do its job. Conflating them
+    would let a failed write be counted as a harmless rejection
+    and the step exit successfully.
+    """
+
+
 def run_gh(args: list[str]) -> str:
     """Run a gh command, returning stdout and raising on failure."""
     proc = subprocess.run(["gh", *args], capture_output=True, text=True, check=False)
     if proc.returncode != 0:
-        raise Rejected(proc.stderr.strip() or f"gh {' '.join(args)} failed")
+        raise GitHubError(proc.stderr.strip() or f"gh {' '.join(args)} failed")
     return proc.stdout
 
 
 def load_field_options(org: str) -> dict[str, dict[str, int]]:
     """Map each org issue field to its option names and ids.
 
-    The option ids prove an option exists at validation time; the
-    write itself sends the option's name.
+    Returns empty when the endpoint is unavailable: the owner may
+    be a user rather than an organisation, or the token may lack
+    the organisation grant. Callers reject proposals that name a
+    priority in that case, rather than failing the whole run and
+    losing the label work too.
     """
-    raw = run_gh(["api", f"orgs/{org}/issue-fields"])
+    try:
+        raw = run_gh(["api", f"orgs/{org}/issue-fields"])
+    except GitHubError:
+        return {}
     data: list[dict[str, Any]] = json.loads(raw)
     fields: dict[str, dict[str, int]] = {}
     for entry in data:
@@ -59,8 +76,14 @@ def load_issue_types(org: str) -> set[str]:
     not safe to assume: an unknown value would fail ``gh issue
     edit --type`` only after labels had already changed, leaving
     the issue half-applied.
+
+    Empty when unavailable, for the reasons in
+    ``load_field_options``.
     """
-    raw = run_gh(["api", f"orgs/{org}/issue-types"])
+    try:
+        raw = run_gh(["api", f"orgs/{org}/issue-types"])
+    except GitHubError:
+        return set()
     entries: list[dict[str, Any]] = json.loads(raw)
     return {str(entry["name"]) for entry in entries}
 
@@ -124,7 +147,7 @@ def put_fields(repo: str, number: str, payload: str) -> None:
         check=False,
     )
     if proc.returncode != 0:
-        raise Rejected(proc.stderr.strip() or "setting issue fields failed")
+        raise GitHubError(proc.stderr.strip() or "setting issue fields failed")
 
 
 def apply(action: dict[str, Any], fields: dict[str, dict[str, int]]) -> None:

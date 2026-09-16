@@ -723,10 +723,10 @@ Remaining:
 
 ## 13. Third Engine: GitHub Copilot
 
-**Status:** Implemented and opt-in. The reusable workflow refuses
-a live run on this engine, so it never applies labels, and that
-stands until the command-level enforcement in §13.4 lands — see
-the containment note in §13.2 for what that gap costs.
+**Status:** Implemented, and since §13.7 able to drive live
+triage like any other engine — it proposes, and a deterministic
+step applies. The containment note in §13.2 still describes what
+its session can reach, which §13.4 is what closes.
 
 The organisation already pays for Copilot. A Copilot engine turns
 triage spend into an existing entitlement rather than a third
@@ -831,8 +831,8 @@ Containment notes specific to this engine:
   offer, and prompt-injected issue text is the threat it fails
   against. Closing it needs a `preToolUse` hook vetting each
   command against the commands the policy names (§13.4). Until
-  that lands, the engine is opt-in, and the reusable workflow
-  refuses live runs on it outright.
+  that lands, the gap bounds what a session can read, not what a
+  run can write (§13.7).
 - **Shell pattern matching.** The CLI approves `gh` and `git`
   commands on their **first-level subcommand** alone. A run
   confirmed it: `shell(gh label:*)` matches
@@ -878,7 +878,7 @@ Containment notes specific to this engine:
 
   So the deny list is defence in depth, and the real enforcement
   sits elsewhere: this engine runs with an `issues: read` App
-  token and the workflow refuses live runs, so a bypassed rule
+  token and applies nothing itself (§13.7), so a bypassed rule
   reaches an API that rejects the write. That layering is why the
   gap costs nothing today — and why §13.4's command-vetting hook
   is a hard precondition for ever pairing this engine with a
@@ -1024,10 +1024,10 @@ allow/deny translation of the shared tool grants, the pinned CLI
 install, session evidence into the artefact bundle, and the
 `copilot` choice on the manual dry-run dispatch and the scheduled
 caller's dispatch. Scheduled runs take the Copilot engine
-(§13.6). The reusable workflow refuses a live run on this
-engine, and down-scopes its App token to `issues: read`, so a
-Copilot session holds no write-capable credential until the
-enforcement below lands. Down-scoped rather than absent, because
+(§13.6), and since §13.7 they can label: the engine proposes and
+a deterministic step applies. The session's own App token stays
+at `issues: read`, so it holds no write-capable credential.
+Down-scoped rather than absent, because
 the scan needs the App's org-wide reach: `github.token` is
 repository-scoped, and a Copilot run without an App token would
 see no repository but its own. Both guards live in the reusable
@@ -1109,12 +1109,12 @@ already pays for Copilot, so triage spend becomes an existing
 entitlement rather than a third vendor relationship, and the
 pipeline stops depending on a long-lived model API key.
 
-That choice carries a cost worth stating plainly: **the schedule
-cannot label anything until §13.4 items 1 and 2 land.** The
-reusable workflow refuses live runs on this engine, so scheduled
-triage reports proposals and applies nothing. Reverting the
-schedule to `claude` is a one-line change if that proves too
-long to wait.
+That choice once carried a cost worth stating plainly: the
+schedule could not label anything, because the workflow refused
+live runs on this engine. §13.7 removed that constraint by taking
+the write out of the agent's hands entirely, so the schedule can
+now label. Reverting to `claude` remains a one-line change if the
+engine disappoints for other reasons.
 
 #### Why a dedicated App rather than a shared one
 
@@ -1258,13 +1258,26 @@ differ by the population the scan excluded on purpose.
 
 #### What this buys
 
-- **No agent session holds write, on any engine.** A harness's
-  containment properties stop deciding whether triage can run,
-  which removes the reason §13.2's gap blocked live use.
-- **Issue fields become reachable.** `gh issue edit` sets
-  neither priority nor type, so both need the REST issue-field
+- **No agent session labels through its own grant, on any
+  engine.** The repository credential a session holds is an
+  `issues: read` App token, so a harness's containment
+  properties stop deciding whether triage can run — which
+  removes the reason §13.2's gap blocked live use.
+
+  One caveat, since the claim is easy to overstate: on the
+  Copilot engine the `copilot_token` secret may itself be a
+  caller `GITHUB_TOKEN` carrying whatever that job granted
+  (§13.3). A caller granting write hands write to the model
+  credential, and this workflow cannot narrow a secret it
+  receives already evaluated. The guarantee is about the
+  repository credential the pipeline mints, not about every
+  value a consumer may pass in.
+- **Issue fields become reachable.** `gh issue edit` sets no
+  issue field, so priority travels over the REST issue-field
   endpoint — something the agent's three-command grant could
-  never have covered, trusted or not.
+  never have covered, trusted or not. Type has a flag
+  (`gh issue edit --type`), but needs the organisation's type
+  list to check against before writing.
 - **`dry_run` stops depending on the agent.** It gates a
   workflow step rather than asking the agent to honour a mode,
   so a confused or prompt-injected session cannot write by
@@ -1273,9 +1286,14 @@ differ by the population the scan excluded on purpose.
 #### Tokens
 
 Two, one per role, as §13.6 describes. The scan and the agent
-read through an `issues: read` token. Writes use a second token
-minted **after** the session ends, for live runs alone, so the
-agent's step has finished before the write credential exists.
+read through an `issues: read` token. The apply step takes a
+second token, minted **after** the session ends so the agent's
+step has finished before it exists. That token carries
+`issues: write` on a live run and `issues: read` on a dry one —
+so a dry run holds nothing capable of writing, rather than
+relying on the applier to honour a flag. Both forms also carry
+the organisation reads the applier needs to check priority
+and type.
 
 #### Consequences
 
@@ -1310,3 +1328,17 @@ reads rather than closing the hole.
    long-running schedule it may be worth surfacing repeated
    rejections, which would point at prompt drift rather than
    individual bad proposals.
+4. **The report observes labels alone.** Both snapshots carry
+   labels, so a retriage run that changes priority or type and
+   nothing else reports "no label changes" and leaves those
+   writes recorded nowhere but `apply-result.json`. Either feed
+   that file into the report, or extend the snapshots to capture
+   issue fields and type.
+5. **Whether `Urgent` should need a human.** The applier checks
+   that the value exists, not that the evidence does — the
+   evidence rule lives in the prompt, and the prompt is advice
+   to an untrusted agent rather than a boundary. Prompt-injected
+   text could still reach `Urgent` on any unprioritised issue in
+   the snapshot. Capping the agent at `High` and leaving
+   `Urgent` to a human would make it a boundary, at the cost of
+   latency on genuine emergencies.

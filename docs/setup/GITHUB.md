@@ -10,19 +10,19 @@ version and invoked directly — no first-party action exists.
 Authenticates with a GitHub token rather than a model API key, so
 this engine adds no third vendor relationship.
 
-> **⚠️ This engine reports; it never applies labels.**
-> It holds a weaker containment boundary than the other two. Its
-> tool allow-list is an approval policy rather than a filter, and
-> the CLI keeps auto-approving shell commands it treats as reads.
-> The reusable workflow **refuses a live run on this engine**:
-> pair it with `dry_run: true` or the run fails fast, and its App
-> token comes back down-scoped to `issues: read` either way.
+> **⚠️ This engine's containment is weaker than the other two.**
+> Its tool allow-list is an approval policy rather than a filter,
+> and the CLI keeps auto-approving shell commands it treats as
+> reads. That bounds what the **session** can reach — not what
+> the run writes: no engine applies anything itself, so writes
+> travel through a deterministic step that revalidates every
+> proposal (section 13.7 of
+> [`../development/DESIGN.md`](../development/DESIGN.md)).
 >
-> This repository schedules dry runs on it every weekday, so a
-> scheduled run is a supported configuration. What waits on the
-> command-level enforcement in section 13.4 of
-> [`../development/DESIGN.md`](../development/DESIGN.md) is live
-> labelling, on any trigger.
+> What remains open is the read side: an auto-approved command
+> can still reach the session's `gh` configuration and the CLI's
+> own environment. The command-level enforcement in section 13.4
+> is what closes that.
 
 <!-- markdownlint-disable MD013 -->
 
@@ -33,7 +33,7 @@ this engine adds no third vendor relationship.
 | Default model | `claude-sonnet-5` |
 | Harness | `@github/copilot` CLI, pinned, installed with npm |
 | Turn ceiling | None — `max_turns` has no analogue; the 20-minute step timeout bounds the session |
-| Label writes | Refused; the engine never applies labels |
+| Label writes | Through the apply step, as with every engine |
 
 <!-- markdownlint-enable MD013 -->
 
@@ -244,7 +244,7 @@ fails the run before the session starts.
 | Symptom | Cause | Fix |
 | ------- | ----- | --- |
 | `Agent runs with engine 'copilot' need the copilot_token secret` | No secret reached the workflow | Add the secret, or pass the caller's token through |
-| `The copilot engine cannot apply labels` | The run set `dry_run: false` | Set `dry_run: true`, or choose `claude` or `gemini` |
+| `The copilot engine cannot apply labels` | A run from before section 13.7; the guard no longer exists | Update to a current version of the workflow |
 | CLI rejects the token on route A | The organisation policy is off, or the grant did not survive the hand-off | Enable the policy; otherwise fall back to route B |
 | CLI rejects the token on route B | The PAT lacks Copilot Requests, has expired, or its owner holds no Copilot seat | Reissue the PAT, or assign its owner a seat |
 | `COPILOT_GITHUB_TOKEN … contains a classic PAT` | A classic PAT reached the CLI, which refuses them regardless of scope | Issue a fine-grained PAT instead |

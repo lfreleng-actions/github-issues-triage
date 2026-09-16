@@ -36,8 +36,8 @@ on:
         type: string
       engine:
         description: >-
-          Agent engine: claude, gemini, or copilot. The copilot
-          engine never applies labels; a live run on it fails fast.
+          Agent engine: claude, gemini, or copilot. Every engine
+          proposes; a later step applies (DESIGN.md 13.7).
         type: string
         default: 'claude'
       model:
@@ -630,7 +630,6 @@ jobs:
           )
           prompt="$(cat artefacts/prompt.md)"
           # --disable-builtin-mcps removes the bundled GitHub MCP
-          #   server, whose label_write tool would otherwise offer a
           #   server, whose label_write tool would otherwise write
           #   labels directly, bypassing the validation the apply
           #   step performs
@@ -673,21 +672,30 @@ jobs:
           if [ -n "$EXECUTION_FILE" ] && [ -f "$EXECUTION_FILE" ]; then
             cp "$EXECUTION_FILE" artefacts/session-transcript.json
             echo "Transcript preserved from: $EXECUTION_FILE"
-            # Claude's action exposes a transcript, never a shared
+            # Claude's action exposes a transcript and no shared
             # summary, so the proposal has to be lifted out of it
             # or the apply step would find nothing and skip every
-            # Claude run in silence.
+            # Claude run in silence. The file is one pretty-printed
+            # JSON array -- JSON.stringify(messages, null, 2) --
+            # so it is decoded whole, not line by line.
             python3 - "$EXECUTION_FILE" <<'EXTRACT'
           import json, sys, pathlib
 
+          try:
+              events = json.loads(
+                  pathlib.Path(sys.argv[1]).read_text(
+                      encoding="utf-8", errors="replace"
+                  )
+              )
+          except json.JSONDecodeError as exc:
+              print(f"Could not decode the Claude transcript: {exc}")
+              raise SystemExit(0)
+          if not isinstance(events, list):
+              print("Claude transcript is not a list of events")
+              raise SystemExit(0)
+
           final = ""
-          for line in pathlib.Path(sys.argv[1]).read_text(
-              encoding="utf-8", errors="replace"
-          ).splitlines():
-              try:
-                  event = json.loads(line)
-              except json.JSONDecodeError:
-                  continue
+          for event in events:
               if not isinstance(event, dict):
                   continue
               if isinstance(event.get("result"), str):
@@ -725,14 +733,27 @@ jobs:
             echo "Session summary already present in artefacts/"
           fi
 
-      # A second, write-capable token, minted only for live runs
-      # and only after the agent session has ended. The agent
-      # never sees it: its step finished before this one starts,
-      # and the value is scoped to the apply step's environment.
-      - name: 'Mint App token for writes 🔐'
+      # A second token for the apply step. Narrowed, but to four
+      # grants rather than two: the applier reads the
+      # organisation's issue fields and types to validate priority
+      # and type before writing them.
+      #
+      # create-github-app-token declares no inputs for those two,
+      # because its permission list is generated and predates
+      # them. It reads any INPUT_PERMISSION-* variable though, so
+      # the undeclared pair below reaches the token request as
+      # issue_fields and issue_types -- the names the installation
+      # itself reports. Actions warns about unexpected inputs; the
+      # alternative is an unnarrowed token inheriting every
+      # installation grant, which is worse.
+      #
+      # Minted for dry runs too, because validation needs the same
+      # reads. The agent never sees it: its step finished before
+      # this one starts.
+      - name: 'Mint App token for the apply step 🔐'
         id: app-token-write
         # yamllint disable-line rule:line-length
-        if: ${{ !inputs.dry_run && inputs.github_app_client_id != '' && steps.prompt.outcome == 'success' }}
+        if: ${{ always() && inputs.github_app_client_id != '' && steps.prompt.outcome == 'success' }}
         # yamllint disable-line rule:line-length
         uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
         with:
@@ -740,23 +761,41 @@ jobs:
           private-key: "${{ secrets.github_app_private_key }}"
           owner: "${{ inputs.org }}"
           repositories: "${{ inputs.repository }}"
-          permission-issues: 'write'
+          # Write only when a write is coming. Dry runs validate
+          # and stop, so they take the same read-only grant the
+          # agent's token has -- keeping "dry run" a property of
+          # the credential and not merely of a flag.
+          # yamllint disable-line rule:line-length
+          permission-issues: "${{ inputs.dry_run && 'read' || 'write' }}"
           permission-metadata: 'read'
+          permission-issue-fields: 'read'
+          permission-issue-types: 'read'
 
       # The agent proposes; this applies. Keeping the two apart
-      # means no agent session holds a write-capable credential,
-      # so a harness whose tool containment is approval rather
-      # than enforcement (DESIGN.md section 13.2) cannot write
-      # anything regardless. Everything the agent emitted is
+      # means the repository credential a session holds is
+      # read-only, so a harness whose tool containment is approval
+      # rather than enforcement (DESIGN.md section 13.2) cannot
+      # write through it. Everything the agent emitted is
       # revalidated here against the run's own scope before it
       # reaches GitHub.
       #
-      # This step also carries priority and type, which the agent
-      # could not set even if trusted: gh issue edit reaches
-      # neither, so both go through the REST issue-field endpoint.
+      # This step also carries priority and type. Priority needs
+      # the REST issue-field endpoint, which gh issue edit cannot
+      # reach; type uses gh issue edit --type. Both need the
+      # organisation reads the token above preserves.
       - name: 'Apply triage proposal 🏷️'
         id: apply
-        if: always() && steps.prompt.outcome == 'success'
+        # Only a session that finished has a proposal worth
+        # trusting. A failed or timed-out one may have left a
+        # partial transcript, and applying half a plan is worse
+        # than applying none. Evidence preservation above runs
+        # regardless; this does not.
+        # yamllint disable rule:line-length
+        if: >-
+          ${{ steps.agent.outcome == 'success' ||
+          steps.agent-gemini.outcome == 'success' ||
+          steps.agent-copilot.outcome == 'success' }}
+        # yamllint enable rule:line-length
         env:
           # yamllint disable-line rule:line-length
           GH_TOKEN: "${{ steps.app-token-write.outputs.token || steps.app-token.outputs.token || github.token }}"
