@@ -173,23 +173,30 @@ avoids paying for weekend runs into an empty queue.
 The default `GITHUB_TOKEN` covers this repository alone; the
 pipeline must label issues **org-wide**, so it will not suffice.
 
-### 5.1 Recommended: the existing org bot GitHub App
+### 5.1 A dedicated GitHub App
 
-The org already operates a bot App (used in `test-release-process` via
-`vars.LF_RELENG_BOT_CLIENT_ID` / `secrets.LF_RELENG_BOT_PRIVATE_KEY`).
-Reuse it — or, if its installation permissions are broader than
-needed, create a sibling `lf-releng-triage` App. Requirements:
+Triage runs as **LF/RelEng Issues Triage Bot**, an App created for
+this pipeline and nothing else. An existing org bot was the
+obvious shortcut, but a shared identity accumulates permissions
+as each new consumer asks for one more, until its blast radius is
+the union of every use case that ever touched it (§13.6).
+Requirements:
 
-- **Permissions:** `issues: write`, `metadata: read` — nothing else
+- **Permissions:** `issues: write`, `metadata: read`, plus
+  `issue_fields: read` and `issue_types: read` at organisation
+  level for priority and type assignment — nothing else
 - **Installation:** all repositories in `lfreleng-actions`
+- **Credentials:** repository-level, not organisation-level. One
+  workflow consumes them, so an org secret would grant read
+  access to every other repository's workflows for nothing
 - **Token minting in-workflow:**
 
 ```yaml
 - uses: actions/create-github-app-token@<commit-sha>  # vX.Y.Z
   id: app-token
   with:
-    client-id: ${{ vars.LF_RELENG_BOT_CLIENT_ID }}
-    private-key: ${{ secrets.LF_RELENG_BOT_PRIVATE_KEY }}
+    client-id: ${{ vars.LF_TRIAGE_BOT_CLIENT_ID }}
+    private-key: ${{ secrets.LF_TRIAGE_BOT_PRIVATE_KEY }}
     owner: lfreleng-actions
     permission-issues: write
     permission-metadata: read
@@ -582,10 +589,9 @@ README.md                                    # rewritten for this repo
 
 ## 10. Open Questions
 
-1. **App reuse vs. new App** — does `LF_RELENG_BOT` already have
-   `issues: write` on all repos, and are we comfortable widening its
-   use, or do we mint a dedicated `lf-releng-triage` App? (Owner:
-   org admins.)
+1. **App reuse vs. new App** — settled: a dedicated
+   **LF/RelEng Issues Triage Bot** App, installed org-wide, with
+   its credentials held at repository level (§5.1, §13.6).
 2. **Exact Opus 5 model string** — confirm against the live model
    catalogue at implementation time.
 3. **Claude Code egress set** — harvest via an audit-mode run

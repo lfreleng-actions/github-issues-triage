@@ -22,9 +22,11 @@
 # The consequence is that scheduled triage reports and never
 # labels: the reusable workflow refuses live runs on this engine,
 # and down-scopes its App token to issues:read, until the
-# command-level enforcement in DESIGN.md section 13.4 lands.
-# Switching this back to 'claude' is the one-line fix if that
-# wait proves too long.
+# command-level enforcement in DESIGN.md section 13.4 lands. A
+# dispatch pairing this engine with a live run fails with that
+# refusal rather than being quietly downgraded. Switching this
+# back to 'claude' is the one-line fix if the wait proves too
+# long.
 name: 'Issues Triage ⏰'
 
 # yamllint disable-line rule:truthy
@@ -35,7 +37,7 @@ on:
   workflow_dispatch:
     inputs:
       engine:
-        description: 'Agent engine (copilot cannot apply labels)'
+        description: 'Agent engine'
         type: choice
         options:
           - copilot
@@ -43,11 +45,11 @@ on:
           - gemini
         default: 'copilot'
       dry_run:
-        description: 'Report intended labels; apply nothing'
+        description: 'Test run only, make no changes'
         type: boolean
         default: true
       retriage:
-        description: 'Re-examine issues that carry labels'
+        description: 'Process all open issues, including labelled ones'
         type: boolean
         default: false
       repository:
@@ -82,25 +84,31 @@ jobs:
       # events, which carry no inputs, and API dispatches that
       # omit this one.
       engine: ${{ inputs.engine || 'copilot' }}
-      # Scheduled runs are always dry-run during rollout; manual
-      # dispatch runs take the operator's choice, except on the
-      # copilot engine. The reusable workflow refuses a live run on
-      # that engine outright (DESIGN.md section 13.2); forcing the
-      # input here turns what would be a failed run into a working
-      # dry-run one.
+      # Scheduled runs are always dry-run during rollout; a manual
+      # dispatch takes the operator's choice. Pairing a live run
+      # with the copilot engine is not silently converted to a dry
+      # run here: the reusable workflow refuses that combination
+      # with an explicit error (DESIGN.md section 13.2), which
+      # tells the operator what happened rather than doing
+      # something they did not ask for.
       dry_run: >-
-        ${{ github.event_name == 'schedule' || inputs.dry_run ||
-        inputs.engine == 'copilot' }}
+        ${{ github.event_name == 'schedule' || inputs.dry_run }}
       retriage: ${{ inputs.retriage || false }}
       repository: ${{ inputs.repository || '' }}
       egress_policy: 'audit'
-      # The App variables live at org level; when unset the
-      # reusable falls back to github.token (single-repo scope),
-      # which suits dry-run rollout. The reusable down-scopes the
-      # App token to issues:read on the copilot engine (DESIGN.md
-      # section 13.4), so this passes the client id unconditionally
-      # and that engine keeps the org-wide reads the scan needs.
-      github_app_client_id: ${{ vars.LF_RELENG_BOT_CLIENT_ID || '' }}
+      # Credentials for the LF/RelEng Issues Triage Bot App, held
+      # at repository level: one workflow consumes them, so an org
+      # secret would grant read access to every other repository's
+      # workflows for nothing. The two credentials fail
+      # differently when absent, which is worth knowing when a run
+      # looks wrong: an empty client id skips the mint and leaves
+      # the job on github.token, narrowing the scan to this
+      # repository, while a missing private key fails the mint
+      # step outright. The reusable down-scopes the App token to
+      # issues:read on the copilot engine (DESIGN.md section
+      # 13.4), so this passes the client id unconditionally and
+      # that engine keeps the org-wide reads the scan needs.
+      github_app_client_id: ${{ vars.LF_TRIAGE_BOT_CLIENT_ID || '' }}
       # Run the pipeline with the assets from the triggering commit.
       assets_repository: ${{ github.repository }}
       assets_ref: ${{ github.sha }}
@@ -110,4 +118,4 @@ jobs:
       anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
       gemini_api_key: ${{ secrets.GEMINI_API_KEY }}
       copilot_token: ${{ secrets.COPILOT_CLI_TOKEN }}
-      github_app_private_key: ${{ secrets.LF_RELENG_BOT_PRIVATE_KEY }}
+      github_app_private_key: ${{ secrets.LF_TRIAGE_BOT_PRIVATE_KEY }}
