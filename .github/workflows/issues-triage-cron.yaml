@@ -19,14 +19,9 @@
 # dispatch picks any of the three; per-engine credentials and
 # their setup live in docs/setup/.
 #
-# The consequence is that scheduled triage reports and never
-# labels: the reusable workflow refuses live runs on this engine,
-# and down-scopes its App token to issues:read, until the
-# command-level enforcement in DESIGN.md section 13.4 lands. A
-# dispatch pairing this engine with a live run fails with that
-# refusal rather than being quietly downgraded. Switching this
-# back to 'claude' is the one-line fix if the wait proves too
-# long.
+# Trusted jobs prepare the offline packet and apply the proposal.
+# The agent job has no App action or installation-token input
+# (DESIGN.md section 13.7).
 name: 'Issues Triage ⏰'
 
 # yamllint disable-line rule:truthy
@@ -59,9 +54,8 @@ on:
 
 permissions: {}
 
-# Never let two triage sessions race; queue instead. Runs are
-# cheap to queue and expensive to interleave: two concurrent agent
-# sessions would label against stale snapshots.
+# Serialise this caller. GitHub may supersede older pending runs;
+# cancel-in-progress: false does not provide a FIFO queue.
 concurrency:
   group: 'issues-triage'
   cancel-in-progress: false
@@ -73,7 +67,7 @@ jobs:
       # Live labelling uses the App token, never this grant
       issues: read  # Snapshot reads when running without the App
       contents: read  # Asset checkout and repository metadata reads
-    uses: ./.github/workflows/issues-triage.yaml
+    uses: $/.github/workflows/issues-triage.yaml
     with:
       # The owner this workflow runs under, which upstream is
       # lfreleng-actions. Naming it this way rather than hard-coding
@@ -84,30 +78,17 @@ jobs:
       # events, which carry no inputs, and API dispatches that
       # omit this one.
       engine: ${{ inputs.engine || 'copilot' }}
-      # Scheduled runs are always dry-run during rollout; a manual
-      # dispatch takes the operator's choice. Pairing a live run
-      # with the copilot engine is not silently converted to a dry
-      # run here: the reusable workflow refuses that combination
-      # with an explicit error (DESIGN.md section 13.2), which
-      # tells the operator what happened rather than doing
-      # something they did not ask for.
+      # Keep the schedule dry until the three-job path and live
+      # App writes have been validated. Dispatch respects the input.
       dry_run: >-
         ${{ github.event_name == 'schedule' || inputs.dry_run }}
       retriage: ${{ inputs.retriage || false }}
       repository: ${{ inputs.repository || '' }}
       egress_policy: 'audit'
-      # Credentials for the LF/RelEng Issues Triage Bot App, held
-      # at repository level: one workflow consumes them, so an org
-      # secret would grant read access to every other repository's
-      # workflows for nothing. The two credentials fail
-      # differently when absent, which is worth knowing when a run
-      # looks wrong: an empty client id skips the mint and leaves
-      # the job on github.token, narrowing the scan to this
-      # repository, while a missing private key fails the mint
-      # step outright. The reusable down-scopes the App token to
-      # issues:read on the copilot engine (DESIGN.md section
-      # 13.4), so this passes the client id unconditionally and
-      # that engine keeps the org-wide reads the scan needs.
+      # Repository-level credentials reach trusted preparation
+      # and application actions, never an action in the agent job.
+      # No client id permits dry-run fallback; a missing key fails
+      # token creation before the agent runs.
       github_app_client_id: ${{ vars.LF_TRIAGE_BOT_CLIENT_ID || '' }}
       # Run the pipeline with the assets from the triggering commit.
       assets_repository: ${{ github.repository }}

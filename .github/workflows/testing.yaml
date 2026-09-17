@@ -39,14 +39,17 @@ concurrency:
 
 jobs:
   plumbing:
-    name: 'Plumbing (secretless)'
+    name: 'Plumbing (secretless, ${{ matrix.invocation }})'
+    strategy:
+      matrix:
+        invocation: [first, second]
     if: github.event_name == 'pull_request'
     permissions:
       # The job passes no secrets and skips the agent session, so
       # even a malicious PR-head script holds nothing but reads.
       issues: read  # Snapshot reads
       contents: read  # Asset checkout and metadata reads
-    uses: ./.github/workflows/issues-triage.yaml
+    uses: $/.github/workflows/issues-triage.yaml
     with:
       # The owner running the test, so a fork exercises its own
       # organisation rather than reaching into the upstream one.
@@ -66,7 +69,7 @@ jobs:
     permissions:
       issues: read  # Snapshot and dry-run reads
       contents: read  # Asset checkout and metadata reads
-    uses: ./.github/workflows/issues-triage.yaml
+    uses: $/.github/workflows/issues-triage.yaml
     with:
       # See the plumbing job: the caller's own owner, so fork runs
       # stay inside the fork.
@@ -87,13 +90,34 @@ jobs:
     secrets:
       anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
       gemini_api_key: ${{ secrets.GEMINI_API_KEY }}
-      # A fine-grained PAT with the 'Copilot Requests' permission.
-      # The secretless alternative -- passing this job's
-      # GITHUB_TOKEN after granting 'copilot-requests: write' --
-      # waits on toolchain support: neither the pinned actionlint
-      # nor the SchemaStore workflow schema recognises that scope
-      # yet, so declaring it here would fail the linting gate.
+      # Personal fine-grained PAT with Copilot Requests and no
+      # repository grants. Native caller tokens are not supported.
       copilot_token: ${{ secrets.COPILOT_CLI_TOKEN }}
+
+  regression:
+    name: 'Offline regression tests'
+    runs-on: 'ubuntu-latest'
+    timeout-minutes: 10
+    permissions:
+      contents: read  # Test checked-out code without write credentials
+    steps:
+      - name: 'Harden runner'
+        # yamllint disable-line rule:line-length
+        uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1 # v2.21.1
+        with:
+          egress-policy: 'audit'
+      - name: 'Checkout repository'
+        # yamllint disable-line rule:line-length
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: 'Install uv'
+        # yamllint disable-line rule:line-length
+        uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
+        with:
+          enable-cache: false
+      - name: 'Run offline regression suite'
+        run: uv run --locked python -B -m unittest discover -s tests -v
 
   docs:
     name: 'Documentation build'

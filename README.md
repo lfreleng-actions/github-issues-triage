@@ -10,46 +10,71 @@ SPDX-FileCopyrightText: 2026 The Linux Foundation
 [![Linux Foundation](https://img.shields.io/badge/Linux-Foundation-blue)](https://linuxfoundation.org/) [![Source Code](https://img.shields.io/badge/GitHub-100000?logo=github&logoColor=white&color=blue)](https://github.com/lfreleng-actions/github-issues-triage) [![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](https://opensource.org/licenses/Apache-2.0) [![OpenSSF Scorecard](https://api.scorecard.dev/projects/github.com/lfreleng-actions/github-issues-triage/badge)](https://scorecard.dev/viewer/?uri=github.com/lfreleng-actions/github-issues-triage)
 <!-- prettier-ignore-end -->
 
-Scheduled AI triage of GitHub issues. A reusable workflow scans an
-organisation's open issues, runs an agent session — **Claude Code,
-the Gemini CLI, or the GitHub Copilot CLI**, selected per run —
-that applies category labels per a versioned policy prompt, and
-attaches full run evidence to the workflow run: before/after
-snapshots, engine-specific session evidence (Claude: a
-turn-by-turn transcript; Gemini: telemetry plus the session
-summary, with transcript fidelity under verification — design doc
-§12; Copilot: CLI logs plus the shared session transcript), and a
-diff-based report.
+Scheduled AI triage of GitHub issues. A reusable workflow prepares
+an offline issue packet, runs an agent to propose labels, priority
+and type, then validates and applies those proposals on a separate
+runner. Before/after snapshots record observed label changes;
+session logs remain separate from the trusted report.
+
+**Copilot is the active validation target.** Claude and Gemini
+remain selectable but unverified in the three-job layout.
 
 ## 📚 Documentation
 
 <https://lfreleng-actions.github.io/github-issues-triage/>
 
-Per-engine setup — credentials, permissions, and the checks that
-prove them — lives in [`docs/setup/`](docs/setup/README.md). The
+Credential setup and validation steps live in
+[`docs/setup/`](docs/setup/README.md). The
 [design document](docs/development/DESIGN.md) covers the
 architecture, containment model, and rollout plan in full.
 
 ## How it works
 
 ```text
-snapshot (before) -> agent session -> snapshot (after)
-                                        -> diff -> report + summary
+prepare (trusted) -> propose (untrusted) -> apply (trusted)
+  snapshot + packet    offline proposal     verify + check
+  SHA + ID + digests ---------------------> write + report
 ```
 
-1. Capture the organisation's open-issue state as JSON
-2. Skip the agent session when zero unlabelled issues exist
-3. Run the selected engine with read/label `gh` verbs and a policy
-   prompt ([`prompt/triage.md`](prompt/triage.md))
-4. Capture the state again, diff, and report observed label
-   movement — never the agent's own claims — to the step summary
-5. Upload the artefact bundle (snapshots, transcript, prompt,
-   report) with 90-day retention, even when the session fails
+Each job uses a separate runner:
+
+1. **Prepare** holds the App key, mints a read token, captures the
+   snapshot and resolves exclusions. It builds `issue-packet.json`
+   with issue titles, bodies, existing labels, types and priorities,
+   plus each repository's label vocabulary.
+2. **Propose** reads the packet instead of querying GitHub issues.
+   It receives no App key or installation token; its job-native
+   `GITHUB_TOKEN` grants `contents: read` and no other permissions.
+   The session skips when `skip_agent` is true, or when no unlabelled
+   issues exist and `retriage` is false.
+3. **Apply** gets the assets commit SHA, evidence artefact ID and
+   snapshot/exclusion digests directly from Prepare. It checks out
+   that commit, downloads evidence by ID and verifies its bytes
+   before minting an App token. It extracts the session into a
+   separate directory and copies a bounded, regular
+   `session-summary.md` for proposal validation, excluding other files.
+4. Writes require a successful proposal job and accepted summary.
+   After evidence verification, Apply can still report a skipped or
+   failed proposal job. Cancellation gates apply and reporting;
+   the report requires snapshot-step success before using after-state.
+
+Prepared evidence and session artefacts have **7-day retention**;
+final results have **90-day retention**. Raw session logs and the
+prompt stay in the session artefact, not the trusted report bundle.
+Producer artefact IDs permit rerunning Apply without its producers
+while their artefacts remain available. A run/attempt/UUID namespace
+avoids collisions between reusable invocations and matrix calls;
+result names add the current attempt. See [Design §13.7](docs/development/DESIGN.md).
+
+Workflow-level concurrency serializes the whole pipeline per caller
+repository and target owner. GitHub may supersede pending runs; this
+is not a FIFO queue. Different caller repositories targeting the
+same organisation need external coordination.
 
 ## Consuming the reusable workflow
 
-Other organisations and users can call the pipeline directly,
-supplying their own tokens:
+Other organisations can call the pipeline with their own credentials.
+Public user-owned targets require dry-run:
 
 <!-- markdownlint-disable MD013 -->
 
@@ -62,35 +87,32 @@ jobs:
       contents: read
     # Pin to an immutable release commit SHA; the tag rides along
     # as a comment. Never reference a mutable branch here: the
-    # workflow receives your API key and an issues:write token.
+    # trusted jobs receive your App private key.
     # yamllint disable-line rule:line-length
     uses: lfreleng-actions/github-issues-triage/.github/workflows/issues-triage.yaml@<commit-sha>  # vX.Y.Z
     with:
       org: 'your-org'
+      engine: 'copilot'
       dry_run: true
       github_app_client_id: ${{ vars.YOUR_APP_CLIENT_ID }}
     secrets:
-      anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+      copilot_token: ${{ secrets.COPILOT_CLI_TOKEN }}
       github_app_private_key: ${{ secrets.YOUR_APP_PRIVATE_KEY }}
 ```
 
 <!-- markdownlint-enable MD013 -->
 
-Pinning the workflow pins its scripts and prompt too: the assets
-checkout defaults to the called workflow's own commit.
+The assets checkout defaults to the called workflow's commit.
+Prepare resolves any trusted `assets_ref` override once and pins
+both downstream checkouts to the resulting SHA.
 
 ### Using the Copilot engine
 
-> [!WARNING]
-> The Copilot engine holds a weaker containment boundary than the
-> other two — see the safety model below and design doc §13.2. It
-> never applies labels: pairing it with `dry_run: false` fails
-> the run before the session starts.
-
-The `copilot` engine needs no model API key. Grant the calling
-job `copilot-requests: write` and hand its `GITHUB_TOKEN` to the
-pipeline; usage meters to the organisation, gated on the "Allow
-use of Copilot CLI billed to the organization" policy.
+Copilot requires a **personal fine-grained PAT** with the
+**Copilot Requests** account permission and **no repository
+permissions**. Store it as `COPILOT_CLI_TOKEN`. Caller-native
+`GITHUB_TOKEN` authentication is no longer supported; do not pass
+that token as `copilot_token` or grant `copilot-requests`.
 
 <!-- markdownlint-disable MD013 -->
 
@@ -100,9 +122,7 @@ jobs:
     permissions:
       issues: read
       contents: read
-      # Authorises Copilot model requests; carries no repository
-      # access of its own.
-      copilot-requests: write
+
     # yamllint disable-line rule:line-length
     uses: lfreleng-actions/github-issues-triage/.github/workflows/issues-triage.yaml@<commit-sha>  # vX.Y.Z
     with:
@@ -110,43 +130,23 @@ jobs:
       engine: 'copilot'
       dry_run: true
     secrets:
-      copilot_token: ${{ secrets.GITHUB_TOKEN }}
+      copilot_token: ${{ secrets.COPILOT_CLI_TOKEN }}
 ```
 
 <!-- markdownlint-enable MD013 -->
 
-Where that policy is unavailable, pass a fine-grained PAT holding
-the "Copilot Requests" permission as `copilot_token` instead and
-drop the `copilot-requests` grant. Both routes, with their
-trade-offs, are in
-[docs/setup/GITHUB.md](docs/setup/GITHUB.md).
+The workflow checks for the `github_pat_` prefix. **That check
+neither validates the token remotely nor proves it lacks extra
+permissions.** The caller must provision and review its grants.
+See [Copilot setup](docs/setup/GITHUB.md) for expiry, entitlement
+and validation requirements.
 
-Labels travel over a repository-access token, and the Copilot
-credential is never that same token. What else the model
-credential can reach depends on the route. A PAT scoped to
-Copilot Requests reaches nothing but the model. The caller
-`GITHUB_TOKEN` carries whatever the calling job grants —
-`issues: read` and `contents: read` in the example above — so
-grant that job reads alone, or the model credential becomes
-write-capable too.
-
-The reusable workflow does not declare `copilot-requests` itself:
-a called workflow can narrow the caller's permissions but never
-widen them, so declaring it there would fail every caller that
-runs a different engine. Passing the token in as a secret leaves
-that decision with you. Design doc §13.3 covers the reasoning, and
-§13.5 records that no run has yet confirmed the grant survives the
-hand-off — if it does not, the CLI rejects the token and the step
-fails with the evidence bundle intact.
-
-Without a GitHub App the pipeline cannot write: dry-run reports
-work with the caller's `github.token` (`issues: read`), and live
-runs refuse to start. Applying labels needs an App installed
-across the target with `issues: write` and `metadata: read`;
-single-repository runs scope the App token to that repository at
-mint time. The `copilot` engine takes the same App token at
-`issues: read`, which keeps its scan organisation-wide while
-leaving it unable to label.
+Without App credentials, trusted jobs use their job-native token
+for dry-run reads within its access. Live runs require an
+organisation App with repository `issues: write`, `metadata: read`
+and organisation `issue_fields: read`, `issue_types: read`.
+Single-repository runs scope the installation token at mint time;
+Propose never receives it.
 
 ### Inputs
 
@@ -155,14 +155,14 @@ leaving it unable to label.
 | Input | Default | Purpose |
 | ----- | ------- | ------- |
 | `org` | (required) | GitHub organisation or user to triage |
-| `engine` | `claude` | Agent engine: `claude`, `gemini`, or `copilot` (refuses live runs) |
+| `engine` | `claude` | Agent engine: `claude`, `gemini`, or `copilot` |
 | `model` | engine default | `claude-opus-5` / `gemini-3.5-flash-lite` / `claude-sonnet-5` |
 | `dry_run` | `true` | Report intended labels; apply nothing |
 | `retriage` | `false` | Re-examine issues that carry labels |
 | `skip_agent` | `false` | Plumbing test: skip the agent session |
 | `repository` | `''` | Restrict the scan to one repository |
 | `exclude_repos` | `''` | Comma-separated repositories to skip |
-| `max_turns` | `80` | Agent session turn ceiling (ignored by `copilot`) |
+| `max_turns` | `80` | Claude turn ceiling; Copilot and current Gemini use the step timeout |
 | `egress_policy` | `audit` | harden-runner mode (`audit`/`block`) |
 | `egress_allow_config` | `''` | `harden-runner-block-action` config coordinate |
 | `github_app_client_id` | `''` | App auth; empty limits runs to dry-run |
@@ -173,7 +173,7 @@ leaving it unable to label.
 | ------ | -------- | ------- |
 | `anthropic_api_key` | claude runs, unless `skip_agent` | Anthropic API authentication |
 | `gemini_api_key` | gemini runs, unless `skip_agent` | Gemini API (AI Studio) authentication |
-| `copilot_token` | copilot runs, unless `skip_agent` | Copilot model requests: caller `GITHUB_TOKEN` or a "Copilot Requests" PAT |
+| `copilot_token` | copilot sessions | Fine-grained PAT (`github_pat_`) for Copilot Requests; no repository permissions |
 | `github_app_private_key` | no | Pairs with `github_app_client_id` |
 
 <!-- markdownlint-enable MD013 -->
@@ -194,46 +194,59 @@ leaving it unable to label.
 
 ## Safety model
 
-- **Dry-run by default**: consumers opt in to live labelling
-- **Tool containment**: the agent receives read verbs of `gh` plus,
-  in live mode, a constrained wrapper that validates repository,
-  issue number, and label existence before a fixed `--add-label`
-  operation — no `gh issue edit`, no `git`, no arbitrary shell
-- **Copilot engine caveat**: that engine restricts the model to
-  shell tools, denies the mutating `gh` and `git` verbs, turns
-  off built-in MCP servers and custom-instruction loading, and
-  keeps both credentials out of the agent's own environment by
-  seeding a `gh` configuration directory instead. Its allow-list
-  is an approval policy rather than a filter, though, and the CLI
-  keeps auto-approving shell commands it treats as reads. Those
-  commands run unsandboxed as the same user, so one can reach the
-  configuration file, or the CLI's own environment a process up.
-  Value-based redaction is what protects the token there, and a
-  command that encodes the value defeats it. Writes stay shut,
-  and the workflow refuses live runs on this engine until the
-  enforcement in design doc §13.4 lands
-- **Token scope**: App tokens carry `metadata: read` plus
-  `issues: write`, or `issues: read` on the `copilot` engine,
-  which cannot label. Down-scoped at mint time, expiring in an
-  hour. The model credential is never the *repository-access*
-  token this pipeline mints: the Anthropic and Gemini keys carry
-  no GitHub permissions at all, and a Copilot PAT scoped to
-  Copilot Requests reaches nothing but the model.
-  The Copilot route that reuses a caller `GITHUB_TOKEN` carries
-  whatever that job grants, so grant such a job reads alone
-- **Prompt-injection defence**: the policy prompt instructs the
-  agent to treat issue text as data; containment limits the worst
-  case to a wrong label
-- **Egress control**: harden-runner in audit or block mode, with
-  the allow-list loaded from a tagged org baseline
+- **Dry-run by default:** the applier validates without writing.
+  Its App token has issue-read access during dry-run or reporting
+  without application; issue-write access requires live mode and
+  proposal success.
+- **App credentials stay in trusted jobs:** neither an App-token
+  action nor its private-key-bearing post action runs in Propose.
+  Job separation alone does not protect artefacts: Apply verifies
+  evidence by producer ID and Prepare's digests, not by name or
+  hashes supplied by the session.
+- **Live checks before writes:** the applier checks scope, normalized
+  exclusions, snapshot membership, current issue state and labels,
+  repository label vocabulary, and organisation field/type options.
+  An existing Priority takes the whole issue out of scope, even in
+  retriage mode. `Urgent` belongs to humans.
+- **Configuration failures are visible:** live organisation
+  configuration read failures are fatal. Dry-run alone permits known
+  endpoint absence or permission denial; outages, rate limits and
+  unknown errors still fail. A search reaching 1,000 results fails
+  before exclusions can hide truncation; restrict the scan.
+- **Bounded processing:** at most 100 eligible issues per packet and
+  100 entries per proposal. Larger batches fail before detail reads
+  or writes rather than sampling. Narrow the repository or
+  exclusions; this processing cap is separate from the search limit.
+  Helper commands have a 30-second timeout.
+- **No transaction or race guarantee:** writes can succeed in part,
+  and humans or other callers can change issues after validation.
+  Recovery needs inspection and targeted action, often
+  `retriage: true` after a partial label write. Never overwrite a
+  human Priority to force replay; the workflow has no automatic rollback.
+- **Untrusted sessions remain a risk:** tool approval rules and
+  secret redaction are not a sandbox. The session may expose issue
+  text, packet contents, model credentials and runtime credentials.
+  Review PAT grants, artefact access and model data handling;
+  a wrong label is not the worst possible outcome.
+- **Egress control:** each runner uses harden-runner in audit or
+  block mode. Audit records traffic; it does not block it.
 
 ## Development
 
-Run the linting suite before pushing:
+Run the offline tests and linting suite:
 
 ```bash
-uvx pre-commit run --all-files
+uv run python -B -m unittest discover -s tests -v
+prek run --all-files
 ```
+
+The offline suite covers policy, GitHub adapters, evidence,
+snapshots and workflow contracts; workflow tests use the PyYAML
+development dependency. The three-job Copilot dry-run and both
+secretless PR invocations passed; see
+[Design §11](docs/development/DESIGN.md#11-rollout-and-validation)
+for run evidence and limits. Live App token minting and real writes
+remain untested. Claude and Gemini are outside active validation.
 
 Build and preview the documentation site locally:
 
