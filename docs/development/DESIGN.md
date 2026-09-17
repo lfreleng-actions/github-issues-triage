@@ -5,1438 +5,533 @@ SPDX-FileCopyrightText: 2026 The Linux Foundation
 
 # Design: Scheduled AI Triage of GitHub Issues
 
-**Status:** Draft
+**Status:** Three-job dry-run passed; live App minting and writes untested
 **Repository:** `lfreleng-actions/github-issues-triage`
 **Author:** Matthew Watkins (AI-drafted, human-reviewed)
-**Last updated:** 2026-08-17
+**Last updated:** 2026-09-17
 
-**How to read this.** Sections record decisions in the order
-taken. A later section supersedes an earlier one rather than
-rewriting it, so where two disagree, the higher number holds.
-§13.7 carries the current answer to how writes happen: the agent
-proposes and a separate step applies, and the `apply-label.sh`
-wrapper that earlier sections describe no longer exists.
+This document describes the current workflow and helper scripts.
+§13.7 defines the prepare/propose/apply trust boundary.
+[§11](#11-rollout-and-validation) records validation evidence and
+its limits. Copilot is the active validation target; Claude and
+Gemini remain selectable but unverified.
 
 ## 1. Problem Statement
 
-Open issues across the `lfreleng-actions` organisation routinely sit
-unlabelled. The daily report produced by
-[`github-security-report-action`](https://github.com/lfreleng-actions/github-security-report-action)
-surfaces this as the **Untriaged** column of its GitHub Issues table —
-at one recent count, 25 of 37 open issues carried no labels at all.
-Unlabelled issues do not appear in release-drafter categories, evade
-maintainers' label filters, and skew the org's backlog-hygiene signal.
-
-Manual triage works (a one-off AI-assisted pass cleared the backlog in
-August 2026) but does not stay done. New issues arrive daily; the org
-needs a recurring, automated triage pass.
+Open issues across `lfreleng-actions` often arrive without labels.
+The [security report](https://github.com/lfreleng-actions/github-security-report-action)
+surfaces them as **Untriaged**, but manual triage does not keep pace
+with new issues. Missing categories weaken release-drafter output,
+maintainer filters and backlog reporting.
 
 ## 2. Goal
 
-A scheduled GitHub Actions workflow in this repository that:
+The scheduled caller runs at **07:00 UTC every weekday**. It scans
+open issues, asks an agent to propose category labels, priority and
+type, and delegates validation and writes to trusted code. Snapshots
+and a diff report show observed label movement.
 
-1. Runs at **07:00 UTC every weekday** (`cron: '0 7 * * 1-5'`)
-2. Scans **all open issues across the `lfreleng-actions` org**
-3. Drives an agent harness running **Anthropic Claude Opus 5**
-4. Applies labels per the org's canonical taxonomy (see §6)
-5. Reports what it did (step summary, and optionally Slack)
+The schedule uses Copilot and stays in dry-run during rollout. The
+reusable workflow defaults to `engine: claude`, so consumers targeting
+current validation should select `copilot` explicitly.
 
-Closing the loop: `github-security-report-action` *surfaces* the
-untriaged backlog; this pipeline *clears* it. Together the Untriaged
-column should trend to zero and stay there.
+### Non-goals
 
-### Non-goals (initial release)
+- Closing, reopening or commenting on issues
+- Editing titles or bodies
+- Assigning people or milestones
+- Triaging pull requests
+- Creating repository labels or organisation field/type definitions
+- Automatic rollback or transactional multi-field updates
 
-- Closing, reopening, or commenting on issues
-- Editing issue titles or bodies
-- Assigning issues to people or milestones
-- Triage of pull requests (the PR autolabeler in
-  `lfreleng-actions/.github` already covers those)
-- Creating labels that do not already exist in a repository
+## 3. Model Access
 
-Each of these is a possible later phase, gated behind explicit
-configuration, but the initial release applies labels and nothing
-else: labels are low-risk, reversible, and auditable.
+### 3.1 GitHub Copilot
 
-## 3. Model Access: Copilot vs. Anthropic API
+The workflow invokes Copilot CLI in programmatic mode with a
+personal fine-grained PAT. It requires Copilot Requests and no
+repository permissions. The workflow rejects caller-native
+`GITHUB_TOKEN`, classic PATs and App installation tokens as model
+credentials. See §13.3 and [Copilot setup](../setup/GITHUB.md).
 
-Two candidate routes to Claude models existed at design time; one
-was viable then. GitHub has since shipped the route the other
-assessment ruled out — see §13.
+### 3.2 Anthropic API
 
-### 3.1 GitHub Copilot subscription — superseded ⚠️
-
-The original assessment recorded here: the org-level Copilot
-subscription exposes Anthropic models **within Copilot surfaces**
-(IDE chat, Copilot CLI, the Copilot coding agent) and nowhere
-else. There is no general-purpose API entitlement, and no
-supported harness exists for "run Claude Code against the Copilot
-backend". GitHub Models (the `models` permission on
-`GITHUB_TOKEN`) offers API access to a catalogue of models, but
-Anthropic models are not part of that catalogue and its rate
-limits target experimentation, not production batch jobs.
-
-Most of that still holds: no general-purpose API entitlement
-exists, and GitHub Models remains the wrong tool. The conclusion
-drawn from it does not. Copilot CLI now carries a supported
-**programmatic mode** and documented GitHub Actions integration,
-which makes the Copilot surface itself a usable harness rather
-than a dead end. Section 13 records the third engine that follows
-from it.
-
-### 3.2 Anthropic API key — recommended ✅
-
-The org holds paid Anthropic subscriptions and can issue API keys. The
-official [`anthropics/claude-code-action`](https://github.com/anthropics/claude-code-action)
-accepts an `anthropic_api_key` input and runs Claude Code
-non-interactively against a prompt. This is Anthropic's supported path
-for CI automation.
-
-- Secret: `ANTHROPIC_API_KEY`, stored as a **repository Actions
-  secret** on this repository (not org-wide — no other pipeline needs
-  it, and scoping narrowly limits blast radius). If the org later
-  standardises on 1Password retrieval
-  (`1password-secrets-action` / `credential-load-action`), migration
-  is a two-line change.
-- Recommended hygiene: a **dedicated Anthropic workspace** for this
-  pipeline so spend is attributable and capped, and the key is
-  rotatable without touching other consumers.
-
-An alternative — authenticating Claude Code with a Claude Pro/Max
-subscription OAuth token (`claude_code_oauth_token`) — works with
-the action but ties the pipeline to an individual's subscription and
-its consumer rate limits. Not appropriate for org infrastructure.
+The retained Claude path uses `anthropic_api_key` with
+`anthropics/claude-code-action`. Its current proposal export and
+runtime behaviour still need verification. Keep any future validation in a
+dedicated workspace with a spend cap; no Claude run forms part of
+this rewrite's active validation.
 
 ## 4. Agent Harness
 
-### 4.1 Options considered
+### 4.1 Selection
 
-<!-- markdownlint-disable MD013 -->
+The workflow keeps provider-specific invocation inside Propose.
+Prepare, policy validation, GitHub writes and reporting stay
+engine-neutral. A bespoke model tool loop would duplicate the
+harnesses; replacing the pipeline with Agentic Workflows would be a
+separate architectural decision.
 
-| Option | Verdict |
-| ------ | ------- |
-| `anthropics/claude-code-action` (official) | ✅ **Selected** |
-| Bespoke script calling the Messages API | ❌ Re-implements tool-use loop, retries, context mgmt |
-| Copilot coding agent | ❌ Repo-scoped, PR-oriented, wrong shape; the CLI is the usable Copilot surface (§13) |
-| Self-hosted agent framework | ❌ Heavyweight; nothing to gain over Claude Code here |
+### 4.2 Invocation contract
 
-<!-- markdownlint-enable MD013 -->
+The agent reads `artefacts/issue-packet.json` and the assembled
+policy prompt. It emits a summary containing a fenced JSON proposal.
+It does not need GitHub issue API access or an App credential.
 
-`claude-code-action` runs Claude Code in "agent mode" when given a
-`prompt` input: no human in the loop, tool use (including `gh` via
-Bash) available, and `claude_args` passes through CLI arguments such
-as `--model` and `--allowedTools`.
-
-### 4.2 Invocation sketch
-
-```yaml
-- uses: anthropics/claude-code-action@<commit-sha>  # vX.Y.Z
-  with:
-    anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
-    github_token: ${{ steps.app-token.outputs.token }}
-    prompt: ${{ steps.build-prompt.outputs.prompt }}
-    claude_args: >-
-      --model claude-opus-5
-      --max-turns 80
-      --allowedTools "Bash(gh issue list:*),Bash(gh issue view:*),
-      Bash(gh issue edit:*),Bash(gh label list:*),
-      Bash(gh search issues:*)"
-```
-
-Notes:
-
-- **Pin by commit SHA** (org rule: never bare version tags, never tag
-  object SHAs). Resolve the SHA at implementation time.
-- **Model identifier**: confirm the exact API model string for Opus 5
-  (`claude-opus-5-…`) against the Anthropic model list when
-  implementing; treat it as a workflow-level `env` value so bumps are
-  one-line changes.
-- **Tool allow-list is the primary containment** — superseded by
-  §13.7 ⚠️: the agent got read/label verbs of `gh` and nothing
-  more — no `git`, no file writes that matter, no arbitrary
-  shell. Two findings undid the reasoning. §13.2 showed an
-  allow-list can be an approval prompt rather than a filter, and
-  §13.7 took the write out of the session altogether, so the
-  credential rather than the tool list is what holds writes shut.
-- `--max-turns` bounds runaway loops; the job also carries a
-  `timeout-minutes` ceiling (suggest 30).
+Copilot uses a pinned npm version. Claude and Gemini use SHA-pinned
+actions. Tool approval rules are defence in depth, not a sandbox
+or proof that the session cannot reach credentials. The trusted
+applier never executes session-provided code.
 
 ### 4.3 Cost control
 
-Opus-class models are expensive. Two mitigations:
-
-1. **Pre-filter before invoking the model.** A cheap `gh search
-   issues --owner lfreleng-actions --state open` step lists unlabelled
-   issues first. If there are none (the steady state), the workflow
-   **skips the model call entirely** — a daily no-op costs one API-free
-   minute of runner time.
-2. **Batch, don't fan out.** One agent session triages all pending
-   issues in a single run rather than one session per issue. Volume is
-   modest (tens of issues at worst after a weekend).
-
-A weekday 07:00 UTC schedule (rather than daily) matches the ask and
-avoids paying for weekend runs into an empty queue.
+Prepare skips Propose when `skip_agent` is true, or when no unlabelled
+issues exist and `retriage` is false. One session handles the
+packet rather than one session per issue. Copilot has a 20-minute
+step timeout inside a 30-minute job; `max_turns` has no effect on it.
+The retained Claude invocation alone consumes `max_turns`.
 
 ## 5. GitHub Authentication and Permissions
 
-The default `GITHUB_TOKEN` covers this repository alone; the
-pipeline must label issues **org-wide**, so it will not suffice.
-
 ### 5.1 A dedicated GitHub App
 
-Triage runs as **LF/RelEng Issues Triage Bot**, an App created for
-this pipeline and nothing else. An existing org bot was the
-obvious shortcut, but a shared identity accumulates permissions
-as each new consumer asks for one more, until its blast radius is
-the union of every use case that ever touched it (§13.6).
-Requirements:
+Live runs require an organisation App. Public user-owned targets
+require dry-run. The App needs:
 
-- **Permissions:** `issues: write`, `metadata: read`, plus
-  `issue_fields: read` and `issue_types: read` at organisation
-  level for priority and type assignment — nothing else
-- **Installation:** all repositories in `lfreleng-actions`
-- **Credentials:** repository-level, not organisation-level. One
-  workflow consumes them, so an org secret would grant read
-  access to every other repository's workflows for nothing
-- **Token minting in-workflow:**
+- Repository `issues: write` and `metadata: read`
+- Organisation `issue_fields: read` and `issue_types: read`
+- Installation access to the target repositories
 
-```yaml
-- uses: actions/create-github-app-token@<commit-sha>  # vX.Y.Z
-  id: app-token
-  with:
-    client-id: ${{ vars.LF_TRIAGE_BOT_CLIENT_ID }}
-    private-key: ${{ secrets.LF_TRIAGE_BOT_PRIVATE_KEY }}
-    owner: lfreleng-actions
-    permission-issues: write
-    permission-metadata: read
-```
+Prepare and Apply alone receive the App private key. Prepare mints
+issue-read access for snapshot and packet reads. Apply mints its own
+token after evidence verification, with organisation definition
+reads and an issue grant chosen for the path: `write` for live mode
+with successful proposal/export gates, otherwise `read`.
 
-The `permission-*` inputs down-scope the minted token even if the App
-itself holds more, and the token expires after one hour — well inside
-the job timeout. App-authored label events also carry attribution
-in each issue's timeline (`lf-releng-bot` avatar), which
-matters for auditability.
+A single-repository input scopes both installation tokens at mint
+time. Tokens expire after an hour. The local configuration uses
+**LF/RelEng Issues Triage Bot**, with repository-level
+`LF_TRIAGE_BOT_CLIENT_ID` and `LF_TRIAGE_BOT_PRIVATE_KEY`.
 
-### 5.2 Rejected: fine-grained PAT
+Without an App, trusted jobs use their job-native token for dry-run
+reads within its access. That token does not grant organisation-wide
+private access. Propose's job-native `GITHUB_TOKEN` has
+`contents: read` and no other permissions. It has no App key,
+installation token or App-token post action.
 
-A PAT bound to a human account works but rots when that human leaves,
-is harder to down-scope per-run, and attributes bot actions to a
-person. Treat it as a stopgap if App reuse stalls.
+### 5.2 Model credentials are separate
 
-## 6. Triage Policy (the prompt's contract)
+The Copilot PAT is for model requests, not repository writes. Its
+prefix does not prove its permissions; caller provisioning remains
+part of the trust boundary. The workflow accepts no PAT substitute for the
+App private-key secret. Anthropic and Gemini API keys are separate
+model credentials on their retained, unverified paths.
 
-The label taxonomy is **already canonical** in the org: the PR
-autolabeler in `.github/.github/release-drafter.yml` maps Conventional
-Commit types to labels, and the August 2026 manual triage pass applied
-the same scheme to issues. The agent must follow it, not invent one.
+## 6. Triage Policy
+
+The policy lives in `prompt/triage.md`; deterministic checks live
+in `scripts/triage_policy.py`.
 
 | Label | Apply when the issue… |
 | ----- | --------------------- |
 | `bug` | reports incorrect behaviour |
-| `feature` | requests new capability (replaces retired `enhancement`) |
-| `documentation` | concerns docs/README/CONTRIBUTING content |
-| `code-quality` | concerns linting, typing, test coverage, hygiene |
-| `CI` | concerns workflows, runners, pre-commit infrastructure |
-| `chore` | tracks maintenance (archival, dep housekeeping) |
+| `feature` | requests new capability |
+| `documentation` | concerns documentation or contributor guides |
+| `code-quality` | concerns linting, typing, tests or hygiene |
+| `CI` | concerns workflows, runners or pre-commit infrastructure |
+| `chore` | tracks maintenance |
 | `refactor` | requests restructuring without behaviour change |
-| `breaking-change` | describes/implies a compatibility break |
+| `breaking-change` | describes a compatibility break |
 | `performance` | concerns speed or resource use |
+| `question` | needs a human decision |
 
-Hard rules encoded in the prompt:
+The applier enforces these rules:
 
-1. **Add existing labels, nothing else**
-   (`gh label list` first; never create labels).
-2. **One-to-two labels per issue** — a primary category, plus at most
-   one secondary (e.g. `bug,code-quality` for a broken linter config).
-3. **Never remove labels a human applied**, with one standing
-   exception: migrate `enhancement` → `feature` (org convention).
-4. **Skip issues that already have labels** unless run with the
-   `retriage` input (see §7).
-5. **When genuinely uncertain, apply `question`** rather than
-   guessing a category — that label *is* the "needs human" signal.
-6. Report every action taken (and every skip, with reason) in a final
-   summary written to `$GITHUB_STEP_SUMMARY`.
+- Propose existing taxonomy labels, with at most two effective
+  taxonomy labels after application. Existing taxonomy labels count.
+- Preserve human labels except the explicit `enhancement` to
+  `feature` migration. `bug` and `feature` must not coexist.
+- Skip labelled issues unless `retriage` is true.
+- Skip the entire issue when it already has a Priority, regardless
+  of retriage mode or an omitted priority proposal.
+- Require priority and type keys; `null` expresses no proposal.
+  Check non-null values against organisation definitions and type
+  against the effective labels.
+- Reserve `Urgent` for humans. An agent can propose `High` with
+  `escalate: true`; escalation with another grade fails validation.
+- Treat issue text and the agent's rationale as untrusted data.
 
-The report's own classification
-(`github-security-report-action`'s `DEFAULT_ISSUE_LABELS`) buckets
-`bug|defect` → Bug, `feature|enhancement` → Feature,
-`documentation|docs` → Docs; the remaining labels above land in the
-report's Other column. That is fine — Other means "labelled, but not
-Bug/Feature/Docs", a healthy state.
-
-The prompt lives in the repository as `prompt/triage.md` (versioned,
-reviewable, diffable); the workflow loads it at run time rather than
-inlining it in YAML.
+Prompt instructions guide classification but do not establish a
+security boundary. The applier validates proposals rather than
+trusting the agent's account of what it did.
 
 ## 7. Workflow Design
 
-The job below lives in the **reusable** workflow
-(`issues-triage.yaml`); the scheduled caller
-(`issues-triage-cron.yaml`) contributes the triggers and org
-secrets. See §7.3 for the split.
-
 ```text
-Triggers (caller):
-  schedule: '0 7 * * 1-5'      # 07:00 UTC, Mon-Fri
-  workflow_dispatch:            # manual runs
-    inputs:
-      retriage:  boolean, default false   # re-examine labelled issues
-      dry_run:   boolean, default false   # report, apply nothing
-      repository: string, optional        # limit scope to one repo
-
-Jobs:
-  scan (ubuntu-latest, timeout-minutes: 30)
-    permissions: {}             # job-level; App token carries the writes
-    steps:
-      1. harden-runner-block-action  -> loads org egress allow-list
-      2. step-security/harden-runner -> egress-policy: block
-      3. actions/create-github-app-token -> issues:write org token
-      4. checkout (this repo, for the prompt file)
-      5. snapshot (before): dump org-wide open-issue state to
-         artefacts/before.json; derive unlabelled count
-         -> if zero and !retriage: write summary, upload snapshot,
-            exit success
-      6. anthropics/claude-code-action -> the triage session
-         (session transcript captured; see 7.2)
-      7. snapshot (after): same dump to artefacts/after.json
-      8. report: diff snapshots + parse transcript ->
-         artefacts/triage-report.{json,md} and $GITHUB_STEP_SUMMARY
-      9. actions/upload-artifact (always(), even on failure)
-     10. (optional) Slack notification via existing org mechanism
+prepare: trusted runner, 15 minutes
+  resolve assets -> snapshot -> packet -> publish evidence
+       | SHA, evidence ID, digests            |
+       |                                      v
+       |                         propose: untrusted runner, 30 minutes
+       |                           offline packet -> session artefact
+       v                                      |
+apply: trusted runner, 15 minutes <------------+
+  verify evidence -> extract summary -> check -> write -> report
 ```
 
-Design points:
+Workflow-level concurrency uses
+`triage-pipeline-${{ github.repository }}-${{ inputs.org }}` with
+`cancel-in-progress: false`. The lock covers the full three-job
+sequence, not each stage independently. GitHub may supersede pending
+runs; this is not a FIFO queue. Different caller repositories need
+external coordination when targeting the same organisation.
+Concurrency does not exclude human edits or unrelated automation.
 
-- **`concurrency`**: `group: issues-triage, cancel-in-progress: false`
-  — never let two triage sessions race; queue instead.
-- **Note on schedule drift**: GitHub `schedule` events can fire late
-  under load. 07:00 UTC is a target, not a guarantee; nothing in this
-  design is time-critical.
-- **Dry-run mode** maps to removing `gh issue edit` from
-  `--allowedTools` and telling the agent to report intended labels
-  without applying them. First week of operation should run dry with
-  human review of the proposals.
-- **Idempotence**: a re-run over an already-triaged org is a no-op by
-  construction (step 5 short-circuits; rule 4 in §6 guards the rest).
+### 7.1 Egress
 
-### 7.1 Egress (harden-runner)
-
-The org runs `step-security/harden-runner` in **block** mode, with
-`harden-runner-block-action` loading the allow-list from the newest
-tagged file in the `.github` special repository. The org allow-list
-(`.github/harden-runner/lfreleng-actions/allow_list.txt`) contains
-**no Anthropic endpoints** today. Required additions:
-
-```text
-api.anthropic.com:443
-```
-
-plus whatever telemetry/statsig endpoints the pinned Claude Code
-release requires. The rollout sequence:
-
-1. The reusable workflow exposes an `egress_policy` input
-   (default `audit`), passed straight to harden-runner.
-2. Initial scheduled runs use **audit** mode; the harden-runner
-   report captures the agent session's outbound endpoints.
-3. A PR against `lfreleng-actions/.github` adds those endpoints to
-   the allow-list.
-4. The org caller flips `egress_policy` to **block**, with
-   `harden-runner-block-action` loading the updated tagged list.
-
-Whether the endpoints belong in the shared
-baseline or in a **supplemental per-repo allow-list** is the
-question of [`lfreleng-actions/.github#161`](https://github.com/lfreleng-actions/.github/issues/161);
-if that lands first, use it — an Anthropic API grant is a
-single-consumer permission and should not be fleet-wide. Until then,
-additions go to the shared list by PR against `lfreleng-actions/.github`.
+Each job uses harden-runner with `egress_policy: audit` by default.
+Block mode first loads the configured organisation allow-list.
+Audit records outbound calls without blocking them. The offline
+packet removes GitHub issue reads from the session's duties; it
+does not disconnect the runner from the model or artefact services.
+Collect current endpoints before enabling block mode.
 
 ### 7.2 Reporting and Run Artefacts
 
-Every run must be fully reconstructable after the fact: what the org
-looked like before, what the agent saw, what it decided and why, and
-what the org looked like afterwards. Three mechanisms deliver this.
+`snapshot.sh` captures repository, number, title, URL, labels and
+timestamps. It validates a single JSON array and fails when search
+returns 1,000 results, before exclusions can conceal truncation.
+Restrict the scan rather than treating the cap as a complete result.
 
-#### Before/after snapshots
+Search completeness and processing capacity are separate limits.
+Preparation filters labelled issues unless retriaging, then refuses
+more than 100 eligible targets before any per-issue API reads. Apply
+refuses more than 100 proposal entries before configuration reads or
+writes. Neither path samples a larger batch: use the
+repository restriction or exclusions to narrow it. GitHub helper
+commands time out after 30 seconds; network latency can still exhaust
+a job deadline, so these bounds are not a completion-time guarantee.
 
-Steps 5 and 7 dump the complete org-wide open-issue state (repo,
-number, title, labels, timestamps) via a single `gh search issues
---json` call each, to `artefacts/before.json` and
-`artefacts/after.json`. The snapshots serve two purposes:
+Exclusions use repository names, trim whitespace, drop blank lines
+and normalize case. File-based lists allow `#` comments; a non-empty
+`exclude_repos` overrides the bundled list. Snapshot publication
+uses temporary files so failed queries do not publish partial JSON.
 
-1. The report step diffs them to compute **ground truth** for what
-   changed — the summary reports observed label changes, not the
-   agent's claims about what it did. Any divergence between the two
-   (agent claims X, diff shows Y) is itself flagged in the summary.
-2. They are cheap insurance: if a run ever needs reverting, the
-   before-snapshot is the authoritative record of prior state.
-
-#### Agent session transcript
-
-The pipeline captures the **entire agent session** and attaches it to
-the run, so we can debug the triage logic turn by turn:
-
-- `claude-code-action` writes a structured execution log (JSON,
-  turn-by-turn: prompts, tool calls, tool results, token usage) and
-  exposes its path as a step output. The workflow copies that file to
-  `artefacts/session-transcript.json` verbatim.
-- The transcript also yields **cost telemetry** (turns used,
-  input/output tokens, model id), which the report step folds into
-  the step summary so spend per run is visible without opening the
-  Anthropic console.
-
-Transcript content is issue text from public repositories plus agent
-reasoning — nothing sensitive by construction. Actions masks
-registered secrets in logs, and the API key is never part of the
-transcript. Should the org later point this pipeline at private
-repositories, GitHub already restricts artefact access to users with
-read access to this repository's Actions runs — but revisit the
-decision then.
-
-#### Artefact upload
-
-A single `actions/upload-artifact` step (SHA-pinned) runs with
-`if: always()` so failed or timed-out sessions still surface whatever
-the run captured — the failure cases are precisely the ones needing
-the transcript. The **agent step carries its own 20-minute timeout**
-inside the job's 30-minute ceiling: a session that hits it fails that
-step alone, leaving the evidence steps guaranteed time to run (a
-job-level timeout would cancel `always()` steps too):
-
-```yaml
-- uses: actions/upload-artifact@<commit-sha>  # vX.Y.Z
-  if: always()
-  with:
-    name: issues-triage-${{ github.run_id }}
-    path: artefacts/
-    retention-days: 90
-    include-hidden-files: false
-```
-
-Contents:
-
-| File | Purpose |
-| ---- | ------- |
-| `before.json` | Org issue state before the session |
-| `after.json` | Org issue state after the session |
-| `session-transcript.json` | Full structured agent session (debugging) |
-| `prompt.md` | The exact assembled prompt the session received |
-| `triage-report.json` | Machine-readable diff + per-issue actions |
-| `triage-report.md` | The same report as rendered in the summary |
-
-90-day retention (vs. the 30-day default) keeps a rolling quarter of
-triage history for trend analysis and post-hoc debugging without
-notable storage cost at these file sizes.
-
-#### Step summary (`$GITHUB_STEP_SUMMARY`)
-
-The summary is the at-a-glance view; artefacts carry the detail. It
-must show the **before/after** movement as well as the actions taken:
-
-1. **Headline counts** — issues scanned / triaged / skipped / errors,
-   turns and tokens used, dry-run flag.
-2. **Before/after table** — per repository: open issues, untriaged
-   before, untriaged after (mirroring the security report's Issues
-   table, so the two documents read side by side).
-3. **Actions table** — one row per touched issue: repo, issue link,
-   labels before → labels after, one-line rationale quoted from the
-   agent.
-4. **Skips and errors** — every issue examined but left alone, with
-   reason (already labelled / `question` applied / API error).
-5. **Artefact pointer** — link to the run's artefact bundle.
-
-- **On failure or non-empty run (optional, phase 2):** Slack message
-  to the existing org channel using the org-wide Slack
-  secrets/variables already consumed by `project-reporting-tool` and
-  `github-security-report-action`.
-- The next morning's security report independently verifies the
-  outcome: its Untriaged column is the external metric of success.
-
-### 7.3 Modular consumption (reusable workflow)
-
-The pipeline splits into a **reusable workflow** carrying the whole
-job, and a **thin scheduled caller** carrying org-specific choices.
-This mirrors the `generic-workflows` pattern the org already uses,
-and lets other organisations (or individuals) consume the pipeline
-by supplying their own tokens — no fork required.
+The workflow keeps three artefacts with distinct lifetimes:
 
 <!-- markdownlint-disable MD013 -->
 
-| File | Role |
-| ---- | ---- |
-| `.github/workflows/issues-triage.yaml` | Reusable (`workflow_call`): propose and apply jobs |
-| `.github/workflows/issues-triage-cron.yaml` | Org caller: schedule, dispatch inputs, secrets |
+| Artefact | Contents | Retention |
+| -------- | -------- | --------- |
+| `triage-evidence-<namespace>` | `before.json`, resolved `excluded-repos.txt`, `issue-packet.json` when Propose runs | 7 days |
+| `triage-session-<namespace>-<current-attempt>` | `prompt.md`, `session-summary.md`, Copilot logs | 7 days |
+| `issues-triage-<namespace>-<current-attempt>` | Verified before-state/exclusions, accepted summary, apply result, available after-state and diff report | 90 days |
 
 <!-- markdownlint-enable MD013 -->
 
-Interface of the reusable workflow:
+Raw session logs remain in the session artefact. Apply copies
+the bounded summary, never logs, prompt or executable assets from
+that directory. The accepted summary still contains untrusted text;
+copying it does not endorse its claims.
 
-<!-- markdownlint-disable MD013 -->
+The report requires after-snapshot step success before using
+after-state; the existence of `after.json` does not suffice. Without
+it, the report is incomplete. The diff observes labels, not
+priority/type changes, and does not prove which actor caused a
+change. `apply-result.json` records apply outcomes; session logs do
+not feed the trusted report or its cost/turn telemetry.
 
-| Input | Default | Purpose |
-| ----- | ------- | ------- |
-| `org` | (required) | GitHub organisation or user to triage |
-| `engine` | `claude` | Agent engine: `claude`, `gemini`, or `copilot` |
-| `model` | engine default | Model; empty resolves per engine (§12, §13) |
-| `dry_run` | `true` | Report intended labels; apply nothing |
-| `retriage` | `false` | Re-examine issues that carry labels |
-| `skip_agent` | `false` | Plumbing test: skip the agent session (secretless) |
-| `repository` | `''` | Restrict the scan to one repository |
-| `exclude_repos` | `''` | Comma-separated repositories to skip |
-| `max_turns` | `80` | Agent session turn ceiling (no effect on `copilot`, §13.2) |
-| `egress_policy` | `audit` | harden-runner mode (`audit`/`block`) |
-| `egress_allow_config` | `''` | `harden-runner-block-action` config coordinate (block mode) |
-| `github_app_client_id` | `''` | App auth; empty limits runs to dry-run |
-| `assets_repository` | this repo | Where to fetch the prompt and report script |
-| `assets_ref` | called workflow's commit | Ref of `assets_repository` to fetch |
+Session and result uploads use `always()`, but cancellation,
+runner loss or upload failure can prevent preservation. Do not
+promise a complete transcript or evidence on every failure. Review
+artefact access and model data handling: packets may include private
+issue content, and logs can contain sensitive data despite redaction.
 
-| Secret | Required | Purpose |
-| ------ | -------- | ------- |
-| `anthropic_api_key` | claude runs, unless `skip_agent` | Anthropic API authentication |
-| `gemini_api_key` | gemini runs, unless `skip_agent` | Gemini API (AI Studio) authentication |
-| `copilot_token` | copilot runs, unless `skip_agent` | Copilot model requests: caller `GITHUB_TOKEN` or a "Copilot Requests" PAT (§13.3) |
-| `github_app_private_key` | no | Pairs with `github_app_client_id` |
+### 7.3 Modular consumption
 
-<!-- markdownlint-enable MD013 -->
+The reusable workflow carries all three jobs. The thin scheduled
+caller supplies triggers and organisation-specific credentials.
+The repository README holds the input reference and pinned
+caller examples; [setup](../setup/README.md) describes permissions.
 
-Defaults favour safe onboarding: a first-time consumer gets a
-dry-run in audit mode scoped by their own token. Without App
-credentials the pipeline cannot write: the job's own token
-carries `issues: read` for snapshots, and **live runs fail fast**
-rather than spend an agent session discovering they cannot label.
-Applying labels — in one repository or across an organisation —
-needs the App (or a PAT passed as the private-key secret
-alternative, discouraged per §5.2); single-repository runs scope
-the App token to that repository at mint time.
+Pin the called workflow to a reviewed commit SHA, not a tag object.
+Assets default to the called workflow commit. Prepare resolves a
+trusted `assets_ref` override once; both downstream jobs consume
+its resolved SHA. If the workflow commit is unavailable, the caller
+must supply a trusted ref. Neither Propose nor an artefact chooses
+the applier's code revision.
 
 ## 8. Repository Layout
 
-This repository started from `workflows-template`, which
-targets *reusable-workflow* repositories. This pipeline is a **caller**
-workflow, not a reusable one, so much of the skeleton does not apply.
-
-### Keep (from `workflows-template`)
-
-- `.pre-commit-config.yaml`, `.gitlint`, `.yamllint`, `.editorconfig`,
-  `.ruff.toml`, `.gitignore` — org-standard linting
-- `.github/workflows/release.yaml` — **required**: promotes draft
-  releases to full releases on tag push (thin caller for the
-  `generic-workflows` release reusable)
-- `.github/workflows/openssf-scorecard.yaml`, `release-drafter.yaml`,
-  `clear-action-cache.yaml`
-- `.github/actionlint.yaml`, `.github/dependabot.yml`
-- `LICENSES/`, `SECURITY.md`
-
-### Remove (template skeletons that do not apply)
-
-- `.github/workflows/build-test.yaml`
-- `.github/workflows/build-test-release.yaml`
-- `.github/workflows/merge.yaml`
-- `.github/workflows/testing.yaml` — the template version
-  exercised the removed `build-test.yaml` skeleton; **replaced** by
-  a triage-specific test. Pull request runs are **secretless**: a
-  same-repository PR can alter the local reusable workflow, so PR
-  checks skip the agent session (`skip_agent`) and prove the
-  plumbing from the PR head with no secret in reach. The full
-  agent dry-run runs from `workflow_dispatch`, a maintainer-
-  triggered, trusted execution path.
-- `examples/` (build-test-release / merge examples)
-- `.readthedocs.yml` — the template's Read the Docs config assumed a
-  Sphinx tree and an installable Python package, and this repository
-  is neither; the documentation site builds with MkDocs and publishes
-  to GitHub Pages instead
-
-### Import from `actions-template`
-
-- `.aislop/config.yml` — AI-slop scan configuration (workflows-template
-  lacks it; this repo will carry a sizeable prompt document and the
-  scanner needs configuring for it)
-- `.github/workflows/tag-push.yaml` — tag-push automation, if we
-  version/release this pipeline's prompt+workflow as a unit
-- `README.md` structure as a reference for badge/header conventions
-  (rewrite content for this repo)
-
-### Add (new)
-
 ```text
-docs/development/DESIGN.md                   # this document
-docs/index.md                                # docs site home
-docs/setup/README.md                         # setup index
-docs/setup/ANTHROPIC.md                      # Claude engine setup
-docs/setup/GOOGLE.md                         # Gemini engine setup
-docs/setup/GITHUB.md                         # Copilot engine setup
-docs/requirements.in                         # direct docs dependency
-docs/requirements.txt                        # compiled, hashed lock
-mkdocs.yml                                   # docs site configuration
-prompt/triage.md                             # the agent's triage policy
-config/excluded-repos.txt                    # repos the scan skips
-scripts/snapshot.sh                          # issue-state capture
-scripts/triage_report.py                     # snapshot diff -> report
-.github/workflows/issues-triage.yaml         # reusable (workflow_call)
-.github/workflows/issues-triage-cron.yaml    # scheduled thin caller
-.github/workflows/testing.yaml               # PR dry-run of the above
-.github/workflows/documentation.yaml         # docs build and deploy
-README.md                                    # rewritten for this repo
+.github/workflows/issues-triage.yaml       # three-job reusable workflow
+.github/workflows/issues-triage-cron.yaml  # schedule and manual caller
+.github/workflows/testing.yaml            # secretless PR / manual dry-run
+prompt/triage.md                           # classification policy
+config/excluded-repos.txt                  # bundled exclusions
+scripts/snapshot.sh                       # bounded open-issue search
+scripts/triage_evidence.py                 # packet, verification, extraction
+scripts/triage_policy.py                   # deterministic proposal checks
+scripts/triage_github.py                   # GitHub adapters
+scripts/apply_triage.py                    # validation and apply outcomes
+scripts/triage_report.py                   # snapshot diff and report
+tests/                                    # offline regression tests
+docs/                                     # MkDocs site and setup guides
 ```
+
+PR plumbing skips the agent and passes no model or App secrets.
+Manual agent validation must use a reviewed ref; a dry-run still
+exposes its model credential to the chosen code.
 
 ## 9. Failure Modes and Mitigations
 
-The two rows naming the label wrapper record the containment of
-the day. §13.7 replaced it: the agent holds no write at all, and
-the applier checks each proposal rather than each command.
-
 <!-- markdownlint-disable MD013 -->
 
-| Failure | Mitigation |
-| ------- | ---------- |
-| Anthropic API outage / 529s | Job fails visibly; next weekday run catches up. No retry storm: one run per day. |
-| Agent mislabels an issue | Labels are reversible; step summary makes every action reviewable; humans can relabel (rule 3 stops the agent undoing them). |
-| Agent goes off-script | `--allowedTools` denies every verb except issue reads plus a constrained label wrapper (validated repo/number/labels, org/repo scope and exclusion enforcement, pull requests rejected, `--add-label` and the coded enhancement migration, nothing else); `--max-turns` and step/job timeouts bound the session. |
-| Prompt-injection via issue body | Real risk: issue text arrives as untrusted input. Containment as above — worst case within the sandbox is a wrong label on some issue, not code execution or data exfiltration (egress is allow-listed). Prompt instructs the agent to treat issue bodies as data, never as instructions. |
-| Rate limits (GitHub) | ~120 open issues org-wide at worst; App tokens get 15k req/hr. Not a concern at this scale. |
-| Cost runaway | Pre-scan short-circuit (§4.3), max-turns, weekday schedule, dedicated Anthropic workspace with a spend cap. |
-| Secret leakage in logs | Actions masks registered secrets; Claude Code does not echo its key; harden-runner blocks unexpected egress. Transcript artefacts contain public issue text and nothing else (§7.2). |
-| Session dies mid-run, no evidence | The agent step's own 20-minute timeout fails it inside the job ceiling; artefact upload runs `if: always()`, so snapshots and partial transcript survive. A missing after-snapshot renders the report "incomplete", never a fabricated zero diff. |
-| Agent self-reports inaccurately | The report step builds the summary from the before/after snapshot diff, not the agent's claims, and flags divergence. |
+| Failure | Handling |
+| ------- | -------- |
+| Search reaches 1,000 results | Fail before exclusions; restrict the scan. |
+| Missing provenance, evidence or digest mismatch | Fail closed before App minting; never fall back to an artefact name. |
+| Failed proposal job or missing export | Do not apply its proposal; report when verified evidence and cancellation gates permit. |
+| Live organisation configuration read failure | Fail, including known missing permissions or endpoints. |
+| Known configuration absence in dry-run | Permit recognized absence/permission denial alone; record dropped priority/type values. |
+| Rate limit, outage or malformed API data | Operational failure, not a harmless proposal rejection. |
+| Invalid or duplicate proposal | Reject it; malformed top-level proposal data fails the step. |
+| Partial write or cancellation during writes | Inspect current state; targeted recovery, not automatic rollback. |
+| Human edit after validation | A race remains; do not describe live reads or concurrency as atomic protection. |
+| Prompt injection or secret exposure | No App credentials in Propose; keep provenance checks, review PAT grants and treat tool rules/redaction as defence in depth. |
 
 <!-- markdownlint-enable MD013 -->
 
 ## 10. Open Questions
 
-1. **App reuse vs. new App** — settled: a dedicated
-   **LF/RelEng Issues Triage Bot** App, installed org-wide, with
-   its credentials held at repository level (§5.1, §13.6).
-2. **Exact Opus 5 model string** — confirm against the live model
-   catalogue at implementation time.
-3. **Claude Code egress set** — harvest via an audit-mode run
-   (§7.1).
-4. **Slack in phase 1 or phase 2?** — the step summary may be enough
-   given the security report already tells us daily whether the
-   backlog is clear.
-5. **Excluded repositories** — the security report excludes
-   `project-reporting-artifacts`, `test-tags-calver`,
-   `test-tags-semantic`; the triage prompt should honour the same
-   exclusion list. Share it via a config file in this repo rather
-   than hard-coding in the prompt.
-6. **Transcript output contract** — resolved: `claude-code-action`
-   v1 (verified at v1.0.193) exposes the structured execution log
-   path as the `execution_file` output; the artefact step in §7.2
-   consumes it.
+- Test the live App mint and field/type permission handling
+  remotely, including the pinned token action's organisation grants.
+- Extend reporting if operators need observed priority/type changes;
+  the current snapshot diff covers labels alone.
+- Check proposal quality, model spend and current egress endpoints
+  in a controlled Copilot run of the new layout.
 
-## 11. Rollout Plan
+## 11. Rollout and Validation
 
-1. **PR 1** — repo tidy-up: remove non-applicable template skeletons,
-   import `actions-template` pieces, rewrite `README.md`, land this
-   document.
-2. **PR 2** — `prompt/triage.md` + `issues-triage.yaml` with the model
-   step stubbed to dry-run; egress allow-list PR against
-   `lfreleng-actions/.github` in parallel.
-3. **Secrets** — create the Anthropic workspace + API key; add
-   `ANTHROPIC_API_KEY` repo secret; confirm App variables/secrets are
-   visible to this repo.
-4. **Week 1** — scheduled dry-runs; human reviews the proposed labels
-   each morning.
-5. **Enable writes** — flip dry-run off; watch the security report's
-   Untriaged column.
-6. **Phase 2 (separate design discussion)** — Slack reporting,
-   duplicate detection, stale-issue nudges, PR triage.
+The local test suite covers policy, GitHub adapters, snapshot
+failures, evidence integrity and workflow contracts, including
+execution of embedded shell snippets with fakes. Workflow tests use
+the PyYAML development dependency.
 
-## 12. Second Engine: Google Gemini
+```bash
+uv run python -B -m unittest discover -s tests -v
+prek run --all-files
+```
 
-**Status:** Implemented; resolved decisions recorded below.
+The [fork Copilot run][fork-validation] at the first consolidated
+head, `a57aa2f`, completed with status `success`: Prepare, Propose,
+Apply and all regression jobs passed with `dry_run: true`,
+`retriage: true` and no App credentials. The [PR testing run][pr-validation]
+also completed with status `success` for both the first and second secretless
+invocations: Prepare and Apply succeeded, and Propose skipped in each.
+Those invocations verified the absence of artefact-name collisions
+between them. The fork result contains five accepted proposals with
+no rejections or failures, and identical before/after snapshots.
+Rerunning Apply reused the producer artefact IDs and published
+a distinct attempt-2 report without repeating the model session.
 
-IT direction steers most agentic work towards Google
-Gemini, so the pipeline gains a second agent engine. The
-architecture already isolates the provider: snapshots, exclusion
-filtering, the policy prompt, the applier, diff reporting,
-and artefact capture are all engine-neutral. The agent session is
-the single provider-specific step.
+[fork-validation]: https://github.com/modeseven-lfreleng-actions/github-issues-triage/actions/runs/35216029661
+[pr-validation]: https://github.com/lfreleng-actions/github-issues-triage/actions/runs/35216002363
 
-### 12.1 Engine selection
+**Live App token minting and real writes remain untested.** Neither
+these App-less runs nor offline simulations prove live App permission
+handling or writes. Test the organisation App path under controlled
+scope, including field/type permissions, and inspect actual issue
+state and apply outcomes before enabling scheduled writes. This
+evidence does not establish production readiness. Keep Claude and
+Gemini outside active validation until a separate effort verifies
+those paths.
 
-The reusable workflow gains an `engine` input (`claude` |
-`gemini`, default `claude`), selecting between two mutually
-exclusive agent-session steps. One reusable workflow, one
-evidence pipeline, one policy prompt — two interchangeable
-engines. A separate reusable per engine would duplicate the
-evidence pipeline and let the copies drift; the single-workflow
-design keeps every hardening decision (§5–§7) applying to both
-engines by construction.
+## 12. Google Gemini
 
-### 12.2 Gemini harness
+The retained path uses `google-github-actions/run-gemini-cli`,
+`gemini_api_key`, and default model `gemini-3.5-flash-lite`. It gets
+the offline packet, not an App credential, and exports the action's
+summary as the proposal source. The current settings allow file and
+`cat`/`jq` reads; they do not pass `max_turns`.
 
-[`google-github-actions/run-gemini-cli`](https://github.com/google-github-actions/run-gemini-cli)
-(Google's official action, verified at v0.1.22) runs the Gemini
-CLI non-interactively against a `prompt` input — the same shape as
-`claude-code-action`. Key mappings:
+Proposal export, runtime behaviour and telemetry fidelity remain
+unverified. The workflow does not copy a raw Gemini transcript into
+the trusted report. This engine is outside active validation.
 
-<!-- markdownlint-disable MD013 -->
+## 13. GitHub Copilot
 
-| Concern | Claude engine | Gemini engine |
-| ------- | ------------- | ------------- |
-| Harness | `anthropics/claude-code-action` | `google-github-actions/run-gemini-cli` |
-| Prompt | `prompt` input (assembled §6) | `prompt` input (same assembly, unchanged) |
-| Model | `--model` via `claude_args` | `gemini_model` input |
-| Tool containment | `--allowedTools` grant list | `settings` JSON: `tools.core` with `run_shell_command(...)` allow-list |
-| Session transcript | `execution_file` output | `upload_artifacts` / CLI telemetry log (verify exact contract) |
-| Turn ceiling | `--max-turns` | `model.maxSessionTurns` in settings JSON |
+### 13.1 Harness
 
-<!-- markdownlint-enable MD013 -->
+The workflow installs `@github/copilot` at `1.0.80` with Node 22 and
+invokes `copilot --prompt`. `model` defaults to `claude-sonnet-5`.
+CLI logs and the `--share` summary go to the separate session
+artefact. The summary supplies the proposal; logs do not permit
+writes.
 
-The tool containment translates directly: the Gemini CLI's
-`tools.core` allow-list grants specific shell commands, so the
-Gemini session receives the same read verbs as the others. Since
-§13.7 it receives nothing beyond them, in any mode.
+### 13.2 Session containment
 
-### 12.3 Authentication
+Propose offers Copilot shell tools, pre-approves `cat` and `jq`,
+and denies `gh`, `git` and the write tool. It disables built-in
+MCPs, custom-instruction loading and auto-update. It no longer seeds
+a `gh` configuration with an App token.
 
-Resolved: **`GEMINI_API_KEY`** (AI Studio), a repository secret
-mirroring the Anthropic arrangement (§3.2). Vertex AI via
-Workload Identity Federation (keyless OIDC) remains available as
-a later increment — the harness supports it — without breaking
-the interface.
-
-The default Gemini model is **`gemini-3.5-flash-lite`** (IT
-choice); the `model` input overrides it per run.
-
-### 12.4 Work items
-
-Delivered: the `engine` input with mutually exclusive agent
-steps, the engine-aware key guard and model resolution, Gemini
-`settings` assembly (`tools.core` allow-list,
-`model.maxSessionTurns`, telemetry into the artefact directory),
-session-summary capture,
-and the `engine` choice on the manual dry-run dispatch and the
-scheduled caller's dispatch. Scheduled runs went to the Copilot
-engine instead (§13.6); Gemini stays a dispatch-time choice until
-the org validates its output quality.
-
-Remaining:
-
-1. Transcript fidelity: confirm the Gemini telemetry log carries
-   turn-by-turn content matching the §7.2 evidence guarantee, and
-   map its cost/turn fields in `load_transcript_stats`
-   (defensive parsing means unmapped fields drop out rather than
-   break the report)
-2. Egress: audit-mode Gemini run to harvest endpoints
-   (`generativelanguage.googleapis.com:443` plus
-   `registry.npmjs.org:443`, which the harness reaches to install
-   the CLI) for the org
-   allow-list, as §7.1 did for Anthropic
-3. README consumption example for the Gemini engine
-
-### 12.5 Open questions (Gemini track)
-
-1. **Transcript fidelity** — does the Gemini CLI emit a
-   turn-by-turn structured log matching what Claude Code's
-   `execution_file` provides? The §7.2 evidence guarantee must
-   hold for both engines.
-2. **Billing ownership** — which GCP project/billing account
-   carries the spend, and what is the Gemini analogue of the
-   per-workspace spend cap?
-
-## 13. Third Engine: GitHub Copilot
-
-**Status:** Implemented, and since §13.7 able to drive live
-triage like any other engine — it proposes, and a deterministic
-step applies. The containment note in §13.2 still describes what
-its session can reach, which §13.4 is what closes.
-
-The organisation already pays for Copilot. A Copilot engine turns
-triage spend into an existing entitlement rather than a third
-vendor relationship, and removes a long-lived model API key from
-the pipeline. Section 3.1 records why the original design ruled
-Copilot out, and what changed since.
-
-The engine slots into the existing abstraction (§12.1): a third
-mutually exclusive agent-session step behind the same `engine`
-input, sharing the snapshots, exclusion filtering, policy prompt,
-applier, diff report, and artefact bundle.
-
-### 13.1 Harness options
-
-<!-- markdownlint-disable MD013 -->
-
-| Option | Verdict |
-| ------ | ------- |
-| Copilot CLI programmatic mode (`copilot -p`) | ✅ **Selected** |
-| [`github/gh-aw`](https://github.com/github/gh-aw) (GitHub Agentic Workflows) | ❌ Replaces this pipeline rather than plugging into it |
-| A first-party Copilot CLI action | ❌ None exists |
-| Copilot coding agent | ❌ Repo-scoped, PR-oriented, wrong shape |
-
-<!-- markdownlint-enable MD013 -->
-
-GitHub's own documentation recommends Agentic Workflows for most
-automation, so the rejection needs justifying. `gh-aw` is a
-compiler: it takes agentic workflows written as Markdown and
-emits `.lock.yml` workflow files, carrying its own safe-output,
-sandboxing, and permission models. Adopting it here would mean
-re-authoring the pipeline in its idiom and displacing the parts
-that stay engine-neutral and already carry review — the evidence
-pipeline (§7.2), the applier, the engine abstraction. That
-makes it the right choice for a greenfield agentic workflow, not
-for a third engine behind an established interface. Worth
-revisiting if this pipeline is ever rebuilt from scratch.
-
-No first-party action exists. Public workflows referencing
-`github/copilot-cli-action` point at a repository that does not
-exist. So the engine installs the CLI from npm at a pinned
-version and invokes it directly, which is the pattern GitHub's
-Actions documentation shows for direct use.
-
-### 13.2 Mapping across the three engines
-
-<!-- markdownlint-disable MD013 -->
-
-| Concern | Claude engine | Gemini engine | Copilot engine |
-| ------- | ------------- | ------------- | -------------- |
-| Harness | `anthropics/claude-code-action` | `google-github-actions/run-gemini-cli` | `copilot -p`, pinned npm install |
-| Prompt | `prompt` input | `prompt` input | `--prompt`, read from `artefacts/prompt.md` |
-| Model | `--model` via `claude_args` | `gemini_model` input | `--model` |
-| Tool containment | `--allowedTools` grant list | `settings` JSON: `tools.core` | `--available-tools` and `--deny-tool` (enforced), `--allow-tool` (approval) |
-| Repository credential | `GH_TOKEN` in the agent's environment | `GH_TOKEN` in the agent's environment | seeded `gh` config dir; absent from the agent's environment |
-| Turn ceiling | `--max-turns` | `model.maxSessionTurns` | none — the step timeout bounds it |
-| Session evidence | `execution_file` output | telemetry log plus summary output | `--log-dir` plus `--share` transcript |
-
-<!-- markdownlint-enable MD013 -->
-
-Containment notes specific to this engine:
-
-- **Approval versus enforcement.** `--allow-tool` is not the
-  allow-list `--allowedTools` is on the Claude side. The CLI
-  auto-approves shell commands it classifies as reads, so naming
-  the `gh` groups pre-approves those without denying others.
-  The engine layers three mechanisms in response:
-  `--available-tools` restricts the model to the shell tools and
-  nothing else, which the CLI enforces outright ("the model won't
-  be able to use it at all"); `--deny-tool` blocks the mutating
-  `gh` and `git` verbs, and outranks every allow rule and any
-  approval the CLI would otherwise infer; `--allow-tool`
-  pre-approves the groups the policy needs.
-
-  What survives that stack is **other commands the CLI treats as
-  reads**, which it auto-approves and no flag withdraws. A run
-  confirmed the gap concretely: with no allow rule at all, `ls`
-  and `cat` both ran, and `cat` returned a file's contents. (The
-  same run showed `gh` sitting outside that classifier — the CLI
-  refused an unapproved `gh label list` — so the gap covers
-  ordinary shell reads, not the policy's own commands.)
-
-  That matters more than "wider reads". The engine keeps both
-  credentials out of the agent's *own* environment (see the
-  redaction note below), which removes the easiest route to a
-  token — a bare `$GH_TOKEN` expansion. It does not remove the
-  general one. Shell commands run unsandboxed by default, as the
-  same user as the CLI, so an auto-approved read reaches the
-  parent process's environment: a run confirmed `ps eww -p $PPID`
-  running without any allow rule and returning the CLI's full
-  environment. Registered values come back masked, so the
-  remaining step is a transformation — encoding the value —
-  which redaction cannot follow.
-
-  Two conclusions follow. Withholding a credential from the
-  agent's shell is worth doing and is not a boundary. And the
-  90-day evidence bundle holds whatever the session could reach,
-  rather than whatever the run granted it.
-
-  Writes remain shut regardless — since §13.7 the session holds
-  no write-capable credential on any engine — but this
-  is a materially weaker boundary than the other two engines
-  offer, and prompt-injected issue text is the threat it fails
-  against. Closing it needs a `preToolUse` hook vetting each
-  command against the commands the policy names (§13.4). Until
-  that lands, the gap bounds what a session can read, not what a
-  run can write (§13.7).
-- **Shell pattern matching.** The CLI approves `gh` and `git`
-  commands on their **first-level subcommand** alone. A run
-  confirmed it: `shell(gh label:*)` matches
-  `gh label list --repo …`, while `shell(gh label list:*)` matches
-  nothing at all — the CLI refuses the command outright, and in
-  `-p` mode a refused command cannot ask for approval. The same
-  run showed **deny** rules matching at full-command granularity:
-  `shell(gh issue edit:*)` blocks `gh issue edit …` even while
-  `shell(gh issue:*)` allows the group.
-
-  That asymmetry shapes the grant. Allow rules name the three
-  first-level groups the policy needs — `gh search`, `gh issue`,
-  `gh label` — and deny rules pare each group back to the verbs
-  the policy actually uses. Mutating verbs go without saying
-  (`gh issue edit`, `gh label create`). The non-issue searches
-  are easier to miss: `gh search` covers `code`, `commits`,
-  `prs` and `repos`, and `gh search code` would put repository
-  content in front of the model and into a 90-day artefact. The
-  engine still emits the bare and `:*` forms of each pattern,
-  since the bare form covers a bare command and neither widens
-  the grant.
-- **Deny rules, and what they are worth.** They outrank every
-  allow rule and any approval the CLI would otherwise infer, and
-  they match further down the command than allow rules do. That
-  makes them useful, and invites reading them as a
-  command-level boundary. They are not one. Matching keys on the
-  leading words of the command, and two valid `gh` spellings walk
-  past it — both confirmed by run, against the production deny
-  list:
-
-  <!-- markdownlint-disable MD013 -->
-
-  | Command | Why it slips through |
-  | ------- | -------------------- |
-  | `gh issue new …` | `new` is an alias of `issue create`; the rule names `gh issue create` |
-  | `gh issue -R o/r edit 1 …` | `-R` is a persistent flag on `gh issue`, so the command no longer begins `gh issue edit` |
-
-  <!-- markdownlint-enable MD013 -->
-
-  The alias is now named in the list, but flag placement defeats
-  **every** entry and no amount of enumeration fixes it: the
-  agent may put any persistent flag ahead of any subcommand.
-
-  So the deny list is defence in depth, and the real enforcement
-  sits elsewhere: this engine runs with an `issues: read` App
-  token and applies nothing itself (§13.7), so a bypassed rule
-  reaches an API that rejects the write. That layering is why the
-  gap costs nothing today — and why §13.4's command-vetting hook
-  is a hard precondition for ever pairing this engine with a
-  write-capable token, rather than an improvement to schedule
-  later.
-- **Token redaction, and the credential the agent never sees.**
-  `--secret-env-vars` does two jobs, and the second one bites:
-  it redacts the named variables' values from output **and**
-  strips those variables from the environment of every shell the
-  agent runs. A run confirmed the strip — a variable named there
-  reads back unset inside an agent command, and the same variable
-  reads back set when the flag omits it.
-
-  So the flag cannot cover `GH_TOKEN`, which is where the
-  repository credential lives: the agent's own `gh` commands
-  would lose their authentication. The engine instead seeds a
-  scratch `gh` configuration directory (`GH_CONFIG_DIR`, under
-  the runner's temporary space) with the token before starting
-  the session, and leaves `GH_TOKEN` in `--secret-env-vars`. The
-  agent's `gh` works from the configuration file; the credential
-  never appears in the agent's environment at all; and
-  value-based redaction still covers it, because the CLI's own
-  process keeps `GH_TOKEN` set — a run confirmed that a file
-  holding the value comes back redacted when the agent reads it.
-
-  That is an improvement on the other two engines here, and it
-  delivers part of the alternative floated in §13.4: no
-  credential sits in the agent's shell environment. It closes
-  none of the gap above. The configuration file remains readable,
-  and so does the CLI's own environment one process up — shell
-  commands run unsandboxed as the same user, and a run confirmed
-  an unapproved `ps eww -p $PPID` returning it. Redaction, not
-  absence, is what protects the value at that point, and
-  redaction follows values rather than intent.
-- **Built-in MCP servers, disabled.** Copilot CLI ships a GitHub
-  MCP server enabled by default, whose `label_write` tool would
-  write labels directly, bypassing the validation the apply step
-  performs (§13.7).
-  `--disable-builtin-mcps` closes that route. Neither of the other
-  two engines ships such a server, so this hardening has no
-  analogue there.
-- **Custom instructions, disabled.** The CLI merges `AGENTS.md`,
-  `CLAUDE.md`, `GEMINI.md`, and `.github/copilot-instructions.md`
-  from the working tree into its system prompt. The working tree
-  holds the assets checkout, which on test runs comes from a pull
-  request head. `--no-custom-instructions` leaves the policy
-  prompt as the single instruction source.
-- **No turn ceiling.** `max_turns` has no Copilot analogue;
-  `--max-ai-credits` caps credits per response, a different unit,
-  and makes no substitute. The agent step's 20-minute timeout
-  bounds the session, inside the job's 30-minute ceiling.
+An approval policy is not a sandbox. Shell reads and same-user
+process access can expose data or credentials beyond the intended
+packet. `--secret-env-vars=COPILOT_GITHUB_TOKEN` and log masking do
+not guarantee secrecy after a value transformation.
+Consider the model PAT, packet and Actions runtime credentials
+exposed to the untrusted runner. A wrong label is not a worst-case
+bound; model spend, data disclosure and artefact interference remain
+risks. §13.7 protects the apply path without relying on those rules.
 
 ### 13.3 Authentication and billing
 
-Copilot CLI reads its credential from `COPILOT_GITHUB_TOKEN`,
-then `GH_TOKEN`, then `GITHUB_TOKEN`. The engine sets the first
-(model access) and the second (repository access) so the two
-never mix. What the Copilot credential *can* reach depends on the
-route. A PAT scoped to Copilot Requests reaches nothing but the
-model. A caller `GITHUB_TOKEN` carries whatever its job grants,
-so a caller that grants write hands write to the model credential
-too; separating the two variables keeps the repository credential
-out of the model path, it does not by itself bound the caller
-token.
-
-Two credentials work for the `copilot_token` secret today, and a
-third remains a candidate (§13.6):
-
-1. **The calling job's `GITHUB_TOKEN`**, where that job grants
-   `copilot-requests: write`. No stored secret, a short-lived
-   token per run, usage metered to the organisation. It depends
-   on the organisation policy "Allow use of Copilot CLI billed to
-   the organization", which GitHub enables by default wherever
-   Copilot CLI is on.
-2. **A fine-grained PAT** carrying the "Copilot Requests"
-   permission. Works regardless of that policy, at the cost of a
-   long-lived credential attributing spend to one person's seat.
-   The permission sits under **Account permissions**, which
-   GitHub offers when the token's resource owner is the user
-   rather than an organisation. The CLI refuses classic PATs
-   outright, whatever scopes they carry.
-
-The CLI states its own supported list, worth quoting here
-because it bounds what this pipeline may rely on. From
-`copilot login --help` at 1.0.80:
-
-> Supported token types include fine-grained personal access
-> tokens (v2 PATs) with the "Copilot Requests" permission, OAuth
-> tokens from the GitHub Copilot CLI app, and OAuth tokens from
-> the GitHub CLI (gh) app.
-
-App **installation** tokens (`ghs_`) are absent from that list.
-GitHub does document installation tokens making Copilot requests
-— "a service [that] needs to make Copilot requests on behalf of
-an organization without a user's credentials" — but that page
-covers the Copilot **SDK**, whose runtime is not this harness.
-An earlier revision of this document said flatly that an
-installation token *cannot* authenticate Copilot requests; a
-later one said it can and named it the best credential here.
-Both overreached. What holds is narrower: the capability exists
-at the API, the CLI does not document it, and no run has tested
-it. §13.6 tracks it as a candidate rather than a route.
-
-The reusable workflow takes a **secret** rather than declaring
-the permission itself, because a reusable-workflow chain can hold
-or reduce permissions, never raise them. Declaring
-`copilot-requests: write` on the triage job would fail every
-existing caller, including callers that never touch this engine.
-Passing the caller's token in as a secret leaves the permission
-decision — and its failure mode — with the consumer that wants
-the engine.
-
-This repository's own callers use the PAT for now: neither the
-pinned actionlint (1.7.12.24) nor the SchemaStore workflow schema
-(check-jsonschema 0.38.0) recognises the `copilot-requests`
-scope, so declaring it locally would fail the linting gate. That
-blocks route 1 until both learn the scope.
-
-One caveat on route 1. The secret's value comes from an
-expression the **caller** evaluates, so it carries the caller
-job's grant rather than the reduced grant this workflow's job
-declares; the downgrade rule governs the token a called workflow
-receives, not a string handed to it as a named secret. GitHub's
-reusable-workflow documentation shows this exact pattern — a
-caller job declaring `pull-requests: write` and passing
-`${{ secrets.GITHUB_TOKEN }}` on to the called workflow — which
-would serve no purpose if the hand-off dropped the grant. The
-reasoning holds, but no run has confirmed it for this scope yet
-(§13.5). It fails closed if wrong: the CLI rejects the token and
-the step fails with the evidence bundle intact.
-
-The default model is **`claude-sonnet-5`**. The CLI's own default,
-`claude-sonnet-4.6`, retires from Copilot Business and Enterprise
-on 2026-09-01, so the engine pins the successor explicitly rather
-than inheriting a default about to disappear. The `model` input
-overrides it per run.
-
-### 13.4 Work items
-
-Delivered: the `copilot` engine value, its credential guard and
-model default, the tool-surface restriction plus the
-allow/deny translation of the shared tool grants, the pinned CLI
-install, session evidence into the artefact bundle, and the
-`copilot` choice on the manual dry-run dispatch and the scheduled
-caller's dispatch. Scheduled runs take the Copilot engine
-(§13.6), and since §13.7 they can label: the engine proposes and
-a deterministic step applies. The session's own App token stays
-at `issues: read`, so it holds no write-capable credential.
-Down-scoped rather than absent, because
-the scan needs the App's org-wide reach: `github.token` is
-repository-scoped, and a Copilot run without an App token would
-see no repository but its own. Both guards live in the reusable
-workflow rather than the caller, so every consumer inherits
-them.
-
-Remaining:
-
-1. **Precondition for live use** — command-level enforcement: a
-   `preToolUse` hook vetting each proposed shell command against
-   the commands the policy names. It closes two gaps in §13.2,
-   not one: the auto-approved reads, and the deny rules that
-   flag placement walks past. Needs the hook payload contract
-   confirmed against a real session before it goes anywhere near
-   a security boundary. Half of the alternative once floated
-   here — keeping the credential out of the agent's shell — has
-   landed as the seeded `gh` configuration directory (§13.2),
-   though §13.2 also records why that buys less than it looks
-   like; the remaining half is vetting the commands themselves
-2. ~~**Second precondition for live use** — a route to the label
-   wrapper.~~ Settled by §13.7: the agent no longer applies
-   anything, so it needs no route to a wrapper. Recorded because
-   the finding still holds — the CLI approves shell commands on
-   their first-level stem, so a wrapper grant would have meant
-   granting bare `bash`
-3. Cost telemetry: `load_transcript_stats` parses a Claude-shaped
-   execution log; map the Copilot CLI's log fields so the report
-   carries turns and spend for this engine too (defensive parsing
-   means unmapped fields drop out rather than break the report)
-4. Replace the fine-grained PAT with a dedicated GitHub App
-   (§13.6). Two questions gate it. First, verify that the CLI
-   accepts an App installation token at all: its documented
-   token list omits them (§13.3), so the whole route may not
-   exist. Second, even if it does,
-   `create-github-app-token` exposes no
-   `permission-copilot-requests` input at any released version
-   or on `main`, so the token needs a hand-rolled mint or an
-   upstream contribution to that action. Neither question
-   touches the App's repository-access tokens
-5. Egress: an audit-mode Copilot run to harvest endpoints
-   (`api.githubcopilot.com:443` and `registry.npmjs.org:443`
-   expected, plus the Node distribution host used by
-   `setup-node`) for the org allow-list, as §7.1 did for
-   Anthropic. A first audit run recorded `api.github.com:443`,
-   `github.com:443` and `registry.npmjs.org:443`; the Copilot
-   backend itself has yet to appear, because that run failed
-   authentication before reaching it
-
-### 13.5 Open questions (Copilot track)
-
-1. **The caller `GITHUB_TOKEN` route** — confirm that a token
-   passed in as a named secret reaches the CLI carrying the
-   caller job's `copilot-requests: write` grant (§13.3). Blocked
-   behind the linting gate, so the PAT route carries the engine
-   until then.
-2. **Model choice** — `claude-sonnet-5` against
-   `claude-haiku-4.5` for what is a classification workload;
-   measure quality against cost on a real backlog.
-3. **Premium-request accounting** — whether per-request billing
-   makes retriage runs materially more expensive here than on the
-   metered API engines, and where the analogue of a per-workspace
-   spend cap lives (cost centres, per §13.3).
-
-Settled by rehearsal runs against CLI 1.0.80:
-
-- **Shell pattern matching** — approval happens on the
-  first-level subcommand; denial matches the whole command. See
-  §13.2.
-- **Folder trust** — `-p` mode starts without asking, on an
-  empty `COPILOT_HOME` and an untrusted working directory alike.
-  No stall.
-
-### 13.6 The scheduled engine and its identity
-
-**Status:** decided for the engine, open for the identity.
-
-Scheduled runs move from Claude to Copilot. The organisation
-already pays for Copilot, so triage spend becomes an existing
-entitlement rather than a third vendor relationship, and the
-pipeline stops depending on a long-lived model API key.
-
-That choice once carried a cost worth stating plainly: the
-schedule could not label anything, because the workflow refused
-live runs on this engine. §13.7 removed that constraint by taking
-the write out of the agent's hands entirely. The schedule still
-passes `dry_run: true` while the rollout runs its course (§11),
-so what changed is that flipping it became a one-line decision
-rather than a blocked one. Reverting to `claude` remains a
-one-line change if the engine disappoints for other reasons.
-
-#### Why a dedicated App rather than a shared one
-
-The credential this pipeline runs on should be a GitHub App
-created for this pipeline and nothing else. Not a personal
-access token, and not an existing organisation bot.
-
-A PAT fails on three counts. It ties an organisation-wide
-scheduled job to one person's continued employment, seat and
-attention. It expires — a 30-day token means the schedule breaks
-in 30 days, without warning, on a weekday morning. And it bills
-premium requests to that person rather than the organisation.
-
-Reusing an existing bot fails differently, and worse over time. A
-shared identity accumulates permissions as each new consumer
-asks for one more, and no consumer ever asks for one fewer. The
-result is a credential whose blast radius is the union of every
-use case that ever touched it, which is precisely what a
-leaked-token incident then costs. A single-purpose App keeps the
-blast radius equal to the job: propose and apply issue labels,
-and make Copilot requests.
-
-#### Shape
-
-The repository-access half holds up. One App, minting a token
-per role:
-
-<!-- markdownlint-disable MD013 -->
-
-| Role | Permission | Minted for | Reaches |
-| ---- | ---------- | ---------- | ------- |
-| Reading | `issues: read` | every engine's scan, as `GH_TOKEN` | issues across the target organisation |
-| Labelling | `issues: write` | engines that can label, as `GH_TOKEN` | issues in the target organisation |
-
-<!-- markdownlint-enable MD013 -->
-
-The model-access half does **not**, though an earlier revision of
-this section claimed otherwise. The idea was a third token from
-the
-same App, carrying `copilot_requests: write` and reaching the
-Copilot backend plus the `metadata: read` every installation
-token holds. That would be the strongest credential here — no
-person, no expiry outage, no stored PAT — and it may yet work.
-But see §13.3: the CLI's documented token list omits
-installation tokens, the GitHub page describing them covers the
-SDK rather than the CLI, and no run has tested one against
-1.0.80. Treat it as a candidate to verify, not a design to build
-against.
-
-Verifying it costs one App and one dispatch: mint a token with
-`copilot_requests: write`, put it in `COPILOT_GITHUB_TOKEN`, run
-the engine. It fails closed — the CLI rejects the token and the
-step fails with the evidence bundle intact — so the experiment is
-cheap and safe. Until someone runs it, the PAT carries this
-engine.
-
-One alternative sits inside the CLI's documented list and
-deserves weighing if the installation token does not work: an
-OAuth token from a GitHub App acting **for a user** (`ghu_`).
-That keeps the App identity but reintroduces a person, and needs
-refresh-token handling that an unattended schedule has nowhere
-good to keep. It trades the problem rather than solving it.
-
-Minting one token per role from one App keeps the separation
-§13.3 requires — neither credential can do the other's job —
-while leaving one identity to audit, one installation to review,
-and one private key to rotate. All expire in an hour.
-
-One caveat, and it applies to the unverified model half alone:
-GitHub's server-to-server documentation says the Copilot
-permission check requires the installation to hold **All
-repositories** access. That is broader than this pipeline needs.
-The `issues` tokens stay scoped by `repository_ids` regardless,
-so the breadth would attach to the model credential — which
-reaches no issue data, but does carry the metadata read every
-installation token holds.
-
-#### Blocker
-
-Even once verified, minting the model token needs tooling that
-does not exist yet. `actions/create-github-app-token` exposes no
-`permission-copilot-requests` input — not at v3.2.0, not at any
-later release, not on `main`. A generator produces its permission
-inputs, so this is a lag rather than a refusal. Until it catches
-up the options are a hand-rolled mint (App JWT, then
-`POST /app/installations/{id}/access_tokens` with
-`{"permissions": {"copilot_requests": "write"}}`) or a
-contribution upstream. A hand-rolled mint inside a security
-boundary deserves more care than a pinned action does, which
-argues for the contribution — and argues for settling the
-verification question first, before anyone writes either.
-
-The repository-access tokens have no such blocker:
-`permission-issues` already exists and the workflow uses it.
-
-### 13.7 Proposing and applying, split apart
-
-**Status:** implemented. Supersedes the live-mode label wrapper
-for every engine.
-
-Until now the agent applied labels itself, through
-`apply-label.sh`. That required handing an agent session a
-write-capable token, which §13.2 showed was unsafe on the
-Copilot engine: its tool containment is an approval policy the
-CLI auto-approves around, deny rules fall to flag placement, and
-an auto-approved read reaches the parent process environment.
-The workflow refused live runs on that engine as a result — and
-since §13.6 moved the schedule onto it, scheduled triage could
-not label anything at all.
-
-The fix is not to harden the agent's write path but to remove
-it. **The agent proposes; a deterministic step applies.**
-
-#### How it fits together
-
-The agent ends its message with one fenced `json` block naming
-the repository, issue, labels, priority and type for each
-proposal, plus the issues it skipped and any injection attempt
-it noticed. `scripts/apply_triage.py` reads that block and
-treats it as untrusted input, revalidating every claim against
-the run's own configuration before anything reaches GitHub.
-
-<!-- markdownlint-disable MD013 -->
-
-| Check | Answers |
-| ----- | ------- |
-| organisation, single-repository restriction, exclusion list | may this run touch that repository at all? |
-| membership of the run's own snapshot | did this run's scan actually see this issue? |
-| live state is open, and an issue rather than a pull request | is the target still the kind of thing triage labels? |
-| live labels against retriage mode | was this issue in scope, or passed over on purpose? |
-| label sits in the taxonomy | is this a label triage may use, not merely one that exists? |
-| label exists in that repository | can this label go on without inventing it? |
-| priority and type against the organisation's definitions | do these options exist here? |
-| type against the labels beside it | does the classification agree with itself? |
-| priority and type present at all | did the agent answer, or wander off the schema? |
-| escalation paired with a `High` proposal | is this flag consistent with the grade beside it? |
-| no priority set already | has a human claimed this issue? |
-
-<!-- markdownlint-enable MD013 -->
-
-The snapshot check is the one that does unobvious work. Without
-it the trust boundary is "any issue in an allowed repository",
-when it should be "the issues this run scanned" — and those
-differ by the population the scan excluded on purpose.
-
-Membership is all the snapshot decides. Eligibility comes from a
-fresh read of each issue, because a session runs for up to twenty
-minutes, and in that window a human can close an issue or label
-it themselves. Ruling on the scan's picture would let the applier
-write over whoever got there first.
-
-#### What this buys
-
-- **No agent session labels through its own grant, on any
-  engine.** The repository credential a session holds is an
-  `issues: read` App token, so a harness's containment
-  properties stop deciding whether triage can run — which
-  removes the reason §13.2's gap blocked live use.
-
-  One caveat, since the claim is easy to overstate: on the
-  Copilot engine the `copilot_token` secret may itself be a
-  caller `GITHUB_TOKEN` carrying whatever that job granted
-  (§13.3). A caller granting write hands write to the model
-  credential, and this workflow cannot narrow a secret it
-  receives already evaluated. The guarantee is about the
-  repository credential the pipeline mints, not about every
-  value a consumer may pass in.
-
-  A second caveat, and the sharper one: the session and the
-  apply step share a workspace. The claim above is about
-  credentials, and holds. It says nothing about the code the
-  apply step runs, which sits in that workspace beside the
-  agent. Settled below by splitting the two into separate jobs.
-- **Issue fields become reachable.** `gh issue edit` sets no
-  issue field, so priority travels over the REST issue-field
-  endpoint — something the agent's three-command grant could
-  never have covered, trusted or not. Type has a flag
-  (`gh issue edit --type`), but needs the organisation's type
-  list to check against before writing.
-- **`dry_run` stops depending on the agent.** It gates a
-  workflow step rather than asking the agent to honour a mode,
-  so a confused or prompt-injected session cannot write by
-  ignoring its instructions.
-
-#### Tokens
-
-Two, one per role, as §13.6 describes. The scan and the agent
-read through an `issues: read` token. The apply step takes a
-second token, minted **after** the session ends so the agent's
-step has finished before it exists. That token carries
-`issues: write` on a live run and `issues: read` on a dry one —
-so a dry run holds nothing capable of writing, rather than
-relying on the applier to honour a flag. Both forms also carry
-the organisation reads the applier needs to check priority
-and type.
-
-#### Consequences
-
-This change deletes `apply-label.sh`. No engine receives a grant
-for it, because none applies anything, and its checks now live
-in the applier, where they run against every proposal rather
-than the subset the agent chose to route through the wrapper.
-
-The agent's tool grant is the same read verbs in every mode.
-Live runs used to widen it; now there is nothing to widen.
-
-What this does **not** fix is §13.2's underlying gap. An
-auto-approved read still reaches the agent's `gh` configuration
-and the CLI's own environment, so the `preToolUse` hook in
-§13.4 remains worth building. The split bounds the damage to
-reads rather than closing the hole.
-
-#### Open questions
-
-1. **Whether the applier should report rather than reject.** A
-   rejected proposal amounts to a line in the run's JSON. For a
-   long-running schedule it may be worth surfacing repeated
-   rejections, which would point at prompt drift rather than
-   individual bad proposals.
-2. **The report observes labels alone.** Both snapshots carry
-   labels, so a retriage run that changes priority or type and
-   nothing else reports "no label changes" and leaves those
-   writes recorded nowhere but `apply-result.json`. Either feed
-   that file into the report, or extend the snapshots to capture
-   issue fields and type.
-3. **The apply step's own token mint has yet to run.** A fork
-   dispatch exercised the agent, the proposal, validation and
-   the apply step inside the workflow, but `testing.yaml` passes
-   no App credentials, so the mint skipped and the step fell
-   back to the job's `github.token`. That token reads no
-   organisation fields, which is why the run dropped every
-   priority and type — the degradation path proving itself by
-   accident. The mint fires from `issues-triage-cron.yaml`,
-   where the credentials live, so the first upstream dispatch
-   after merge is what confirms it. Watch for the undeclared
-   `permission-issue-fields` and `permission-issue-types` inputs
-   reaching the token request; the scan's own mint shares every
-   other part of the mechanism and runs green daily.
-
-   Watch the priority write in particular. Review read the
-   endpoint as needing `issue_fields: write`, and this design
-   reads it as needing `issues: write`: the reference for `POST
-   /repos/{owner}/{repo}/issues/{n}/issue-field-values` lists
-   "Issues repository permissions (write)", and `issue_fields`
-   is the organisation permission covering `GET
-   /orgs/{org}/issue-fields`, which the applier reads and does
-   not write. Setting a value on an issue is an issue mutation;
-   defining the field is not.
-
-   Nobody has verified that reading, and the App holds
-   `issue_fields: read` (§5.1), so requesting write would exceed
-   the installation and fail the mint outright — a worse outcome
-   than the one it guards against. The failure mode if the
-   reading is wrong is loud rather than silent: `add_fields()`
-   raises, the proposal lands in `failed`, and the step exits
-   non-zero having applied labels but no priority. The remedy
-   then is to grant the App `issue_fields: write` **first**, and
-   make `permission-issue-fields` conditional on `dry_run` the
-   way `permission-issues` already is.
-
-#### Settled
-
-**Proposing and applying run in separate jobs.** The split began
-as one job running the agent first and the applier last, which
-ordered the two without separating them. Three routes crossed
-that gap. A session's shell runs unsandboxed as the same user
-(§13.2), so `--deny-tool=write` withholds the CLI's file-writing
-*tool* and says nothing about a redirect: an auto-approved `gh
-issue view N --jq .body > triage-assets/scripts/apply_triage.py`
-made issue text the applier. `artefacts/before.json` and the
-exclusion list sat in the same workspace, so the snapshot bound
-and the scope checks rested on it too. And a process the session
-started outlived the step that started it, because the runner
-reaps orphans when the job ends, leaving `/proc` on a later
-step's environment and the write token in it.
-
-Step boundaries order work. Job boundaries separate it. The
-applier now runs in a second job: the snapshot and exclusion
-list upload as an artefact **before** the session starts, where
-nothing it does afterwards can reach them; the scripts arrive
-from a fresh checkout of the same immutable ref rather than from
-a workspace a session held; and that runner mints the write
-token itself, after the first job and its processes have ended.
-Data crosses between them, never code and never a credential.
-
-The cost is a second runner, another checkout, and one more
-mint. Cheap beside the alternative, which was a claim about
-credentials standing in for a claim about code.
-
-**`Urgent` belongs to humans.** The applier refuses it and the
-prompt tells the agent to propose `High` with `escalate` set
-instead. The evidence rule behind a priority lives in the
-prompt, and a prompt is advice to an untrusted agent rather than
-a boundary — so while the agent could reach the top of the
-ladder, injected issue text had a prize worth pursuing.
-Withholding `Urgent` makes the limit enforceable rather than
-advisory, and the `escalate` flag keeps the signal without the
-write. The cost is latency on a genuine emergency, which a human
-resolves by reading the flag.
-
-**Claude and Gemini are out of scope for this path.** Both
-engines' proposal routes exist in the workflow but neither has
-run: Claude's lifts the final message out of a transcript, and
-Gemini's assumes the action's `summary` output passes the
-agent's message through verbatim. Two review rounds found two
-bugs in the Claude parser alone, in code that has never
-executed — which measures how far those paths deserve trust.
-Copilot is the engine the schedule uses and the one proven end
-to end. Treat the other two as unverified until someone runs
-them, and consider removing them if they stay unused.
+`copilot_token` must be a personal fine-grained PAT with Copilot
+Requests and no repository permissions. The step sets
+`COPILOT_GITHUB_TOKEN` and checks the `github_pat_` prefix. This is a
+format guard, not remote validation or proof of missing extra grants.
+The caller must provision and review the token's permissions.
+
+Caller-native `GITHUB_TOKEN` is no longer supported as a model
+credential. There is no caller-token permission-inheritance claim
+in this design. Propose's own native token has `contents: read`
+and no other permissions, independent of the model PAT.
+
+The PAT owner needs Copilot entitlement and access to the selected
+model. Usage draws on that entitlement; expiry, rotation and billing
+limits need operational ownership. App installation tokens are not
+an alternative model-authentication route in this workflow.
+
+### 13.4 Validation work
+
+See [§11](#11-rollout-and-validation) for the successful three-job
+Copilot dry-run and remaining validation limits. Inspect proposal
+outcomes and audit network endpoints for the pinned CLI. No Claude
+or Gemini run belongs to this validation effort.
+
+### 13.5 Open questions
+
+Measure classification quality and spend on a representative backlog.
+The default model is a configuration choice, not evidence of the
+cheapest or most accurate option. Remote live App minting and
+writes remain pending (§10–§11).
+
+### 13.6 Scheduled identity
+
+The schedule selects Copilot and remains dry-run. A dedicated App
+handles trusted repository reads and writes; a separate personal PAT
+handles model requests. Do not combine these roles by passing an App
+key or repository-capable PAT to Propose. Rotate the model PAT before
+expiry rather than treating prefix acceptance as a health check.
+
+### 13.7 Prepare, propose and apply
+
+#### Trusted preparation
+
+Prepare runs on its own runner and holds the App key. Its issue-read
+installation token scans issues and builds `issue-packet.json` from
+eligible snapshot members, subject to the 100-issue processing cap
+(§7.2). The packet includes issue titles, bodies, states,
+existing labels, types and priorities, plus repository label names
+and descriptions. Existing Priority values remain visible so the
+agent can skip those issues. Packet reads do not mutate GitHub.
+
+Prepare resolves the assets ref to a commit SHA and publishes these
+job outputs: `assets_sha`, `evidence_id`, `before_sha256`,
+`exclusions_sha256` and `namespace`. The digests cover the exact
+bytes of `before.json` and `excluded-repos.txt`; they are not a claim
+that every file in the evidence artefact has a separate trusted hash.
+
+The namespace combines run ID, producer attempt and a fresh UUID.
+It distinguishes reusable invocations and matrix calls automatically,
+without asking callers to invent collision-free names.
+
+#### Untrusted proposal runner
+
+Propose checks out Prepare's SHA and downloads the packet using
+Prepare's evidence ID. No action in this job receives the App key
+or an installation token. It runs no App-token action that could expose the key
+after the session. Its native `GITHUB_TOKEN` grants `contents: read`
+and no other permissions. Copilot gets the PAT described in §13.3
+for model access, without repository permissions.
+
+Treat the session artefact and `session_id` output as untrusted data,
+not code or evidence provenance. Runtime credentials may permit artefact
+interference: a name alone does not authenticate an upload, and an
+earlier upload is not immune merely because it preceded the agent.
+
+#### Trusted application
+
+Apply depends on both jobs but takes the assets SHA, evidence ID and
+digests **directly from Prepare**, never through Propose or files in
+the downloaded artefact. Missing or malformed provenance fails closed.
+It checks out that SHA, downloads evidence by producer ID into
+`evidence/`, and verifies snapshot/exclusion bytes against Prepare's
+digests before copying them or minting any App token.
+
+`scripts/triage_evidence.py` checks bounded regular files without
+following final symlinks: 16 MiB for the snapshot and 1 MiB for
+exclusions. A forged sidecar digest or replacement artefact with the
+same name cannot supply the trusted expected values. Missing or
+expired producer evidence requires investigation or new preparation,
+not a name-based fallback.
+
+The session download goes into `untrusted-session/`, separate from
+`evidence/`, `triage-assets/` and the report directory. The helper
+copies a regular, non-symlink `session-summary.md` of at most
+8 MiB. It ignores other session files, including forged snapshots,
+Python modules and raw logs; none enters the trusted code path.
+The applier then parses the summary's JSON as untrusted input.
+
+Validation checks owner/repository scope, normalized exclusions,
+snapshot membership, live issue kind/state/labels, label vocabulary,
+priority/type options and classification consistency. It refuses
+`Urgent` and skips any issue with an existing Priority. Unreadable
+Priority is an operational failure, not an empty field.
+
+Live organisation configuration read failures are fatal.
+`--dry-run` alone allows known endpoint absence (404/410) or recognized
+permission denial. Rate limits, unknown 403s, malformed responses
+and transient failures still fail. When definitions are genuinely
+absent, validation can drop unavailable priority/type values and
+record why rather than inventing options.
+
+#### Success gates and reporting
+
+Apply requires successful preparation and no cancellation to start.
+It can run after a skipped or failed proposal job to
+report, but session download and extraction require proposal success.
+The apply step requires proposal-job success and successful summary
+extraction; normal step-success gating also requires provenance,
+verification and token setup to succeed. Dry-run and reporting
+without application must not mint an issue-write token.
+
+After-snapshot and report steps require verified evidence and no
+cancellation, even if application failed. Passing `--after` to the
+report requires snapshot-step outcome `success`. A stale file is
+not proof of a successful snapshot. It records proposal/apply status
+and observed label movement, not raw session-log claims.
+
+#### Reruns and partial writes
+
+Evidence and session artefacts have 7-day retention; final results
+have 90-day retention. Downloads use the IDs from their producing
+jobs rather than reconstructing names from the current attempt.
+This permits rerunning Apply without its producers when their outputs
+and artefacts remain available. Session and final result names append
+the current attempt
+to Prepare's namespace, avoiding immutable-name conflicts on reruns.
+
+This is replayable evidence, not transactional application. Labels,
+type and Priority use separate requests; a later failure can leave
+earlier writes in place. The workflow has no automatic rollback. Inspect
+current state and `apply-result.json` before targeted recovery, often
+with `retriage: true` after a label write. Never overwrite a human
+Priority to force replay; the existing-Priority guard still applies.
+
+The workflow lock serializes the full sequence per caller repository
+and owner (§7), but cannot exclude cross-caller or human edits.
+Fresh reads reduce stale decisions without eliminating the race
+between validation and writes. Cancellation also cannot undo a
+request that already succeeded.

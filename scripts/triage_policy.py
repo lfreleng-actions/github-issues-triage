@@ -21,6 +21,7 @@ from pathlib import Path
 from typing import Any, cast
 
 from triage_github import (
+    GitHubError,
     Rejected,
     existing_priority,
     load_field_options,
@@ -61,14 +62,12 @@ TAXONOMY = frozenset(
 MISSING = object()
 REPO_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*/[A-Za-z0-9._-]+$")
 MAX_LABELS = 2
-# The agent's proposal is the last fenced json block. There is
-# always more than one: the shared transcript echoes the prompt,
-# whose worked example has the same shape. Position alone
-# decides. Filtering for well-formed blocks first would let a
-# malformed final block fall through to the prompt's example and
-# pass it off as a proposal the agent never made.
-FENCE_RE = re.compile(r"```json\s*\n(.*?)\n```", re.DOTALL)
-PROPOSAL_KEY = '"proposals"'
+MAX_BATCH_ISSUES = 100
+# Track all fences, not just completed JSON blocks: otherwise a
+# truncated or mislabelled final answer falls back to the prompt's
+# worked example. Opening and closing delimiters must match.
+FENCE_RE = re.compile(r"^[ \t]*(`{3,}|~{3,})([^\r\n]*)\r?$", re.MULTILINE)
+CANONICAL_LABELS = {name.lower(): name for name in TAXONOMY}
 
 
 @dataclass
@@ -92,26 +91,43 @@ class Context:
 
 def extract_proposal(text: str) -> dict[str, Any]:
     """Pull the proposal object out of the agent's final message."""
-    blocks = FENCE_RE.findall(text)
-    if not blocks:
-        raise Rejected("no fenced json block found")
-    block = str(blocks[-1])
-    if PROPOSAL_KEY not in block:
-        raise Rejected("the final json block carries no 'proposals' key")
+    opening: re.Match[str] | None = None
+    block: str | None = None
+    for fence in FENCE_RE.finditer(text):
+        if opening is None:
+            opening = fence
+            block = None
+        elif (
+            fence[1][0] == opening[1][0]
+            and len(fence[1]) >= len(opening[1])
+            and not fence[2].strip()
+        ):
+            if opening[2].strip() == "json":
+                block = text[opening.end() : fence.start()]
+            opening = None
+    if opening is not None:
+        raise Rejected("the final proposal fence is unterminated")
+    if block is None:
+        raise Rejected("the final fenced block must be json")
     try:
         parsed: Any = json.loads(block)
-    except json.JSONDecodeError as exc:
+    except (ValueError, RecursionError) as exc:
         raise Rejected(f"the final proposal block is malformed: {exc}") from exc
     if not isinstance(parsed, dict):
         raise Rejected("the final proposal block is not an object")
+    if "proposals" not in parsed:
+        raise Rejected("the final json block carries no 'proposals' key")
     return cast("dict[str, Any]", parsed)
 
 
 def load_exclusions(path: str | None) -> set[str]:
     """Read the excluded repository names, lowercased."""
-    if not path or not Path(path).is_file():
+    if not path:
         return set()
-    lines = Path(path).read_text(encoding="utf-8").splitlines()
+    try:
+        lines = Path(path).read_text(encoding="utf-8").splitlines()
+    except (OSError, UnicodeError) as exc:
+        raise GitHubError(f"could not read exclusions: {exc}") from exc
     return {line.strip().lower() for line in lines if line.strip()}
 
 
@@ -136,7 +152,7 @@ def load_snapshot(path: Path) -> set[tuple[str, int]]:
 
 def check_scope(repo: str, ctx: Context) -> None:
     """Refuse targets outside the run's declared scope."""
-    if not REPO_RE.match(repo):
+    if not REPO_RE.fullmatch(repo):
         raise Rejected(f"repository fails validation: {repo}")
     owner, _, name = repo.partition("/")
     if owner.lower() != ctx.org.lower():
@@ -207,9 +223,9 @@ def check_labels(
     for name in labels:
         if name not in TAXONOMY:
             raise Rejected(f"label sits outside the triage taxonomy: {name}")
-    known = repo_labels(repo, ctx.label_cache)
+    known = {name.lower() for name in repo_labels(repo, ctx.label_cache)}
     for name in labels:
-        if name not in known:
+        if name.lower() not in known:
             raise Rejected(f"label does not exist in {repo}: {name}")
     return labels, effective
 
@@ -299,7 +315,12 @@ def validate(item: dict[str, Any], ctx: Context) -> dict[str, Any]:
     if live.labels and not ctx.retriage:
         raise Rejected(f"{repo}#{number} already carries labels; not retriaging")
 
-    labels, effective = check_labels(repo, item, ctx, live.labels)
+    # GitHub treats label names case-insensitively, including labels
+    # applied by humans. Count those under their taxonomy spelling.
+    carried = frozenset(
+        CANONICAL_LABELS.get(name.lower(), name.lower()) for name in live.labels
+    )
+    labels, effective = check_labels(repo, item, ctx, carried)
     if "bug" in effective and "feature" in effective:
         raise Rejected("bug and feature contradict each other")
 
@@ -357,9 +378,11 @@ def validate(item: dict[str, Any], ctx: Context) -> dict[str, Any]:
     if not isinstance(migrate, bool):
         raise Rejected(f"migrate_enhancement must be a boolean: {migrate!r}")
     if migrate:
-        if "enhancement" not in live.labels:
+        if "enhancement" not in carried:
             raise Rejected(f"{repo}#{number} does not carry 'enhancement'")
-        if "feature" not in repo_labels(repo, ctx.label_cache):
+        if "feature" not in {
+            name.lower() for name in repo_labels(repo, ctx.label_cache)
+        }:
             raise Rejected(f"{repo} has no 'feature' label to migrate to")
 
     escalate = item.get("escalate", False)
@@ -385,8 +408,10 @@ def validate(item: dict[str, Any], ctx: Context) -> dict[str, Any]:
     }
 
 
-def build_context(snapshot: set[tuple[str, int]]) -> Context:
-    """Assemble the run's configuration from the environment."""
+def build_context(
+    snapshot: set[tuple[str, int]], *, allow_unavailable: bool = False
+) -> Context:
+    """Assemble configuration, tolerating known unavailability only for dry runs."""
     org = os.environ.get("TRIAGE_ORG", "")
     if not org:
         sys.exit("TRIAGE_ORG is not set")
@@ -395,7 +420,7 @@ def build_context(snapshot: set[tuple[str, int]]) -> Context:
         only=os.environ.get("TRIAGE_REPOSITORY") or None,
         excluded=load_exclusions(os.environ.get("TRIAGE_EXCLUDE_FILE")),
         retriage=os.environ.get("TRIAGE_RETRIAGE", "") == "true",
-        fields=load_field_options(org),
-        types=load_issue_types(org),
+        fields=load_field_options(org, allow_unavailable=allow_unavailable),
+        types=load_issue_types(org, allow_unavailable=allow_unavailable),
         snapshot=snapshot,
     )

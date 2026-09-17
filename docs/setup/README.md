@@ -5,15 +5,14 @@ SPDX-FileCopyrightText: 2026 The Linux Foundation
 
 # Setup
 
-The pipeline runs one agent session per run, driven by one of three
-interchangeable engines. Everything either side of that session —
-snapshots, exclusion filtering, the policy prompt, proposal
-validation and application, the diff report, the artefact
-bundle — is engine-neutral,
-so setting up an engine means providing one credential and
-choosing the `engine` input.
+The pipeline uses three separate runners: trusted **Prepare**,
+untrusted **Propose**, and trusted **Apply**. Prepare builds an
+offline packet with issue bodies, existing labels, types and
+priorities. Propose classifies that packet; Apply verifies evidence
+and validates proposals before writing.
 
-Pick the engine you intend to run and follow its guide:
+Copilot is the active validation target. Claude and Gemini remain
+selectable but unverified in this layout:
 
 <!-- markdownlint-disable MD013 -->
 
@@ -21,43 +20,52 @@ Pick the engine you intend to run and follow its guide:
 | ------ | -------------- | ---------- | ----- |
 | Anthropic Claude | `claude` (default) | `anthropic_api_key` | [ANTHROPIC.md](ANTHROPIC.md) |
 | Google Gemini | `gemini` | `gemini_api_key` | [GOOGLE.md](GOOGLE.md) |
-| GitHub Copilot | `copilot` | `copilot_token` | [GITHUB.md](GITHUB.md) |
+| GitHub Copilot | `copilot` | Fine-grained `copilot_token` PAT for model access | [GITHUB.md](GITHUB.md) |
 
 <!-- markdownlint-enable MD013 -->
 
-Each guide covers the credential, the permissions it needs, where
-to store it, the egress endpoints the engine reaches, and how to
-verify the result.
+Use the Copilot guide for current setup and validation. The legacy
+engine guides do not establish support for the new layout.
 
 ## Shared prerequisites
 
-### Labelling credentials (all engines)
+### GitHub App for trusted reads and writes
 
-Applying a label always travels over a GitHub App installation
-token, so live runs need App credentials whichever engine drives
-the session:
+Live runs require an organisation App. Public user-owned targets
+require dry-run. Configure the App for the intended repositories:
 
 <!-- markdownlint-disable MD013 -->
 
 | Setting | Value |
 | ------- | ----- |
 | App permissions | `issues: write` and `metadata: read` on repositories; `issue_fields: read` and `issue_types: read` on the organisation |
-| Installation | Every repository in the target organisation |
+| Installation | Target repositories; all repositories for an organisation-wide scan |
 | Client id | Passed as the `github_app_client_id` input |
 | Private key | Passed as the `github_app_private_key` secret |
 
 <!-- markdownlint-enable MD013 -->
 
-The workflow down-scopes the minted token further at mint time,
-and the token expires after an hour. In this organisation the
-dedicated **LF/RelEng Issues Triage Bot** App supplies both
-halves through `vars.LF_TRIAGE_BOT_CLIENT_ID` and
-`secrets.LF_TRIAGE_BOT_PRIVATE_KEY`, held at repository level.
+Prepare holds the private key and mints `issues: read` plus
+`metadata: read` for snapshots and packet assembly. Apply verifies
+the prepared evidence before minting its own token, including the
+organisation definition reads. Its issue-write grant requires live
+mode with a successful proposal job and accepted summary; all other
+paths request `read`. Propose receives
+neither the App key nor an installation token, including through
+App-token post actions. Its job-native `GITHUB_TOKEN` has
+`contents: read` and no other permissions.
 
-Without App credentials the pipeline still reports: dry runs read
-issues through the caller's `github.token`. Live runs
-(`dry_run: false`) refuse to start, because the job holds
-`issues: read` by design and could never apply a label.
+Installation tokens expire after an hour. The `repository` input
+also scopes both mints to that repository. In this organisation,
+**LF/RelEng Issues Triage Bot** uses repository-level
+`vars.LF_TRIAGE_BOT_CLIENT_ID` and
+`secrets.LF_TRIAGE_BOT_PRIVATE_KEY`.
+
+Without App credentials, trusted jobs use their job-native token
+for dry-run reads within its access; it does not grant organisation-wide
+private access. Live mode refuses to start without an App client ID.
+The current live App mint and field/type writes still need remote
+validation; offline tests do not verify GitHub's permission handling.
 
 ### Where credentials live
 
@@ -67,35 +75,93 @@ secrets work too when more than one repository calls the
 pipeline; the workflow sees nothing but the value handed to its
 named secret input.
 
-The Anthropic and Gemini keys carry no GitHub permissions at all,
-and a Copilot PAT scoped to Copilot Requests reaches nothing but
-the model. One route differs: the Copilot engine can reuse the
-calling job's `GITHUB_TOKEN`, which carries whatever permissions
-that job grants. Grant such a job reads alone — see
-[GITHUB.md](GITHUB.md).
+Copilot requires a personal fine-grained PAT with Copilot Requests
+and no repository permissions. Caller-native `GITHUB_TOKEN`
+authentication is no longer supported. The `github_pat_` prefix
+check does not test the token remotely or prove the absence of
+extra grants; the caller must review them. See [GITHUB.md](GITHUB.md).
 
-## Verifying a new engine
+The App key belongs in trusted jobs, never Propose. Treat `assets_repository`
+and `assets_ref` as trusted code choices: Prepare resolves the ref
+once, and downstream jobs use its commit SHA. Do not run unreviewed
+assets with secrets.
 
-Run the manual dry-run before trusting an engine with anything:
+## Validation
+
+Start with the offline tests and the linting suite:
 
 ```bash
-gh workflow run testing.yaml -f engine=<claude|gemini|copilot>
+uv run python -B -m unittest discover -s tests -v
+prek run --all-files
 ```
 
-That dispatch runs in dry-run mode with `retriage: true`, so the
-session always has issues to classify and always produces
-proposals to inspect. It reports the labels it would apply and
-applies none.
+The workflow-contract tests use the PyYAML development dependency.
+The local suite, three-job Copilot dry-run and both secretless PR
+invocations passed; see
+[Design §11](../development/DESIGN.md#11-rollout-and-validation)
+for run evidence and limits. Claude and Gemini remain outside
+active validation.
 
-Check the run's artefact bundle afterwards. It carries the
-before and after snapshots, the assembled prompt, the engine's
-session evidence, and the diff report — including when the
-session fails, which is when it matters most.
+For further validation, a maintainer can dispatch Copilot against
+a reviewed, trusted ref:
 
-A missing or empty credential fails the run in seconds, at the
-`Resolve engine and model` guard, before any spend. That guard
-checks that a credential arrived, not that it works: an invalid
-credential fails later, inside the session.
+```bash
+gh workflow run testing.yaml -f engine=copilot
+```
+
+This check uses `dry_run: true` and `retriage: true`. It can examine
+labelled issues but does not guarantee eligible issues or non-empty
+proposals. It passes no App credentials; live App token minting and
+real writes remain untested and require a separate controlled
+organisation-App run.
+The Copilot step rejects a missing or non-PAT token before launching
+the CLI; the prefix check does not test authentication.
+
+Inspect all three artefacts:
+
+- **Evidence, 7 days:** snapshot, normalized exclusions and offline
+  issue packet when the agent runs. Prepare supplies the artefact ID
+  and snapshot/exclusion digests directly to Apply.
+- **Session, 7 days:** prompt, summary and Copilot logs. Apply extracts
+  this separately and copies a bounded regular summary, excluding
+    other files.
+- **Results, 90 days:** verified before-state, available after-state,
+  accepted summary, apply outcomes and diff report. Raw session logs
+  stay out of this bundle. The report requires snapshot-step success
+  before using after-state and observes labels, not priority/type.
+
+## Scope, failures and recovery
+
+A scan reaching the 1,000-result search cap fails visibly **before**
+exclusion filtering. Restrict `repository` rather than accepting an
+incomplete scan. Exclusions use repository names, trim whitespace,
+ignore blank lines and normalize case. A non-empty `exclude_repos`
+input overrides the bundled list; file-based lists allow `#` comments.
+
+Live organisation configuration read failures are fatal. Dry-run
+alone permits known endpoint absence or missing permission and
+records unavailable priority/type values as dropped. Rate limits,
+transient failures and unknown errors still fail. The applier refuses
+an issue whose existing Priority it cannot resolve and skips any
+issue with a Priority, including during retriage.
+
+Workflow-level concurrency covers the full prepare/propose/apply
+sequence per caller repository and target owner. GitHub may supersede
+pending runs; `cancel-in-progress: false` is not a FIFO queue.
+Different callers targeting the same organisation need coordination.
+
+A run/attempt/UUID namespace avoids reusable and matrix artefact
+collisions without caller-supplied names. Downloads use producer IDs,
+so rerunning Apply without its producers can reuse their available
+evidence. Final result names append the current attempt.
+
+Writes are nontransactional: a label change can succeed before a type
+or Priority write fails. Cancellation does not undo completed writes,
+and live checks do not prevent races with human edits. Inspect
+`apply-result.json` and the current issue before targeted recovery.
+Replay often needs `retriage: true` after labels have changed, but
+must never overwrite a human Priority. There is no automatic rollback
+or guarantee that rerunning will complete a partial application.
 
 ## Further reading
 

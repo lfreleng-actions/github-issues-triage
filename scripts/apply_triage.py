@@ -35,6 +35,7 @@ from typing import Any, cast
 
 from triage_github import GitHubError, Rejected, apply
 from triage_policy import (
+    MAX_BATCH_ISSUES,
     Context,
     build_context,
     duplicate_targets,
@@ -48,16 +49,17 @@ CONTROL_RE = re.compile(r"[\x00-\x1f\x7f]")
 
 
 def one_line(value: object) -> str:
-    """Hold an untrusted value to the line that prints it.
+    """Render untrusted text without control characters or runner commands.
 
-    This output reaches an Actions log, where a line opening with
-    ``::`` is a workflow command the runner obeys. Rationales and
-    rejection reasons quote agent text, which in turn quotes issue
-    bodies, so a newline inside one would start a line this code
-    never wrote. Every caller supplies its own prefix, so folding
-    the breaks away is enough to keep a value where it belongs.
+    The legacy ``##[command]`` syntax is recognised even after a
+    log prefix. Escape it and the modern ``::`` syntax as well as
+    folding control characters; keep the original in JSON evidence.
     """
-    return CONTROL_RE.sub(" ", str(value))
+    return (
+        CONTROL_RE.sub(" ", str(value))
+        .replace("::", "%3A%3A")
+        .replace("##[", "%23%23[")
+    )
 
 
 def process(
@@ -173,25 +175,17 @@ def main() -> None:
     args = parser.parse_args()
 
     if not args.proposal.is_file():
-        sys.exit(f"no proposal file at {args.proposal}")
+        sys.exit(f"no proposal file at {one_line(args.proposal)}")
     if not args.snapshot.is_file():
-        sys.exit(f"no snapshot file at {args.snapshot}")
+        sys.exit(f"no snapshot file at {one_line(args.snapshot)}")
 
     try:
         proposal = extract_proposal(args.proposal.read_text(encoding="utf-8"))
-    except Rejected as exc:
+    except (Rejected, OSError, UnicodeError) as exc:
         # A proposal nobody can read is a failed run, not a quiet
         # no-op: the session spent its budget and produced nothing
         # usable, and the operator needs to see that.
-        sys.exit(f"Could not read the agent's proposal: {exc}")
-    # A configuration read that failed is not a proposal problem
-    # and has no per-proposal outcome to record: without it the
-    # applier cannot tell a missing option from an unreachable
-    # API, so the run stops here rather than guessing.
-    try:
-        ctx = build_context(load_snapshot(args.snapshot))
-    except GitHubError as exc:
-        sys.exit(f"Could not read the organisation's configuration: {exc}")
+        parser.exit(1, f"Could not read the agent's proposal: {one_line(exc)}\n")
 
     # An empty list is a run that found nothing to do; anything
     # else in this field is a proposal nobody can act on. Treating
@@ -200,11 +194,31 @@ def main() -> None:
     # reading the block at all is meant to rule out.
     raw_items: Any = proposal.get("proposals")
     if not isinstance(raw_items, list):
-        sys.exit(
+        parser.exit(
+            1,
             "Could not read the agent's proposal: 'proposals' is "
-            f"{type(raw_items).__name__}, not a list"
+            f"{type(raw_items).__name__}, not a list\n",
         )
     items = cast("list[Any]", raw_items)
+    if len(items) > MAX_BATCH_ISSUES:
+        parser.exit(
+            1,
+            f"Could not read the agent's proposal: {len(items)} proposals exceed "
+            f"the {MAX_BATCH_ISSUES}-issue limit; narrow the repository scope "
+            "or add exclusions and rerun.\n",
+        )
+
+    # A configuration read that failed is not a proposal problem
+    # and has no per-proposal outcome to record: without it the
+    # applier cannot tell a missing option from an unreachable
+    # API, so the run stops here rather than guessing.
+    try:
+        ctx = build_context(
+            load_snapshot(args.snapshot), allow_unavailable=args.dry_run
+        )
+    except GitHubError as exc:
+        sys.exit(f"Could not read the organisation's configuration: {one_line(exc)}")
+
     applied, rejected, failed = process(items, ctx, args.dry_run)
 
     counts = {

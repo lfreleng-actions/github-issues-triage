@@ -5,24 +5,9 @@ SPDX-FileCopyrightText: 2026 The Linux Foundation
 
 # GitHub (Copilot) engine setup
 
-Runs the GitHub Copilot CLI, installed from npm at a pinned
-version and invoked directly — no first-party action exists.
-Authenticates with a GitHub token rather than a model API key, so
-this engine adds no third vendor relationship.
-
-> **⚠️ This engine's containment is weaker than the other two.**
-> Its tool allow-list is an approval policy rather than a filter,
-> and the CLI keeps auto-approving shell commands it treats as
-> reads. That bounds what the **session** can reach — not what
-> the run writes: no engine applies anything itself, so writes
-> travel through a deterministic step that revalidates every
-> proposal (section 13.7 of
-> [`../development/DESIGN.md`](../development/DESIGN.md)).
->
-> What remains open is the read side: an auto-approved command
-> can still reach the session's `gh` configuration and the CLI's
-> own environment. The command-level enforcement in section 13.4
-> is what closes that.
+The workflow installs Copilot CLI `1.0.80` from npm and invokes it
+in programmatic mode. It reads an offline issue packet and emits
+proposals; trusted jobs perform GitHub reads and writes.
 
 <!-- markdownlint-disable MD013 -->
 
@@ -31,81 +16,52 @@ this engine adds no third vendor relationship.
 | `engine` input | `copilot` |
 | Secret | `copilot_token` |
 | Default model | `claude-sonnet-5` |
-| Harness | `@github/copilot` CLI, pinned, installed with npm |
-| Turn ceiling | None — `max_turns` has no analogue; the 20-minute step timeout bounds the session |
-| Label writes | Through the apply step, as with every engine |
+| Harness | `@github/copilot`, pinned npm version |
+| Turn ceiling | `max_turns` has no effect; the step timeout is 20 minutes |
+| Apply path | Separate trusted runner; see [Design §13.7](../development/DESIGN.md) |
 
 <!-- markdownlint-enable MD013 -->
 
-## Choosing an authentication route
+## Authentication contract
 
-The Copilot CLI takes its credential from `COPILOT_GITHUB_TOKEN`,
-which the workflow fills from the `copilot_token` secret. Two
-kinds of credential work, and they differ in who pays and what
-else the credential can reach.
+Pass a **personal fine-grained PAT** with the **Copilot Requests**
+account permission and **no repository permissions**. The workflow
+sets it as `COPILOT_GITHUB_TOKEN` on the Copilot step.
+
+**Caller-native `GITHUB_TOKEN` authentication is no longer supported.**
+Do not pass `${{ secrets.GITHUB_TOKEN }}` as `copilot_token` or add
+`copilot-requests` to the caller's permissions. Classic PATs and App
+installation tokens are not supported model credentials here either.
+
+The step checks for the `github_pat_` prefix before launching the
+CLI. This rejects missing, native and classic tokens, but **does not
+prove a PAT has no extra permissions or test it remotely**.
+The caller must review its grants. A PAT with repository write
+permissions would undermine the intended separation.
+
+## Create and store the PAT
+
+1. Open <https://github.com/settings/personal-access-tokens/new>.
+2. Set **Resource owner** to your personal account so GitHub shows
+   **Account permissions**.
+3. Grant **Copilot Requests** and no repository permissions.
+4. Choose an expiry, arrange rotation before that date, and copy
+   the value without logging it.
+5. Store it as the calling repository's Actions secret
+   `COPILOT_CLI_TOKEN` under **Settings > Secrets and variables >
+   Actions**.
+
+The token owner needs an active Copilot entitlement and access to
+the selected model. Usage draws on that person's entitlement; review
+billing limits and model availability before scheduling runs.
+
+## Caller example
+
+This App-less example supports dry-run reads within the job token's
+access. For organisation-wide private reads or live writes, add the
+App credentials from [shared setup](README.md).
 
 <!-- markdownlint-disable MD013 -->
-
-| | Route A: caller `GITHUB_TOKEN` | Route B: fine-grained PAT |
-| --- | --- | --- |
-| Stored secret | None | Long-lived PAT |
-| Lifetime | One run | Until expiry or revocation |
-| Billed to | The organisation, metered directly | The PAT owner's Copilot seat |
-| Needs a Copilot seat | No | Yes, held by the PAT owner |
-| Needs an org policy | Yes | No |
-| Other repository access | Whatever else the calling job grants | None |
-| Tied to a person | No | Yes |
-
-<!-- markdownlint-enable MD013 -->
-
-Route A is the credential GitHub recommends for workflows. Route
-B is the quickest to try, and the right choice for evaluating the
-engine before committing to it. Route B is what this repository
-uses today, because route A waits on toolchain support for the
-`copilot-requests` scope.
-
-Neither route *needs* repository write, and route B cannot gain
-it: a fine-grained PAT carrying Copilot Requests alone holds no
-repository permission whatever. Route A is not self-limiting in
-the same way. It
-hands the calling job's `GITHUB_TOKEN` to the CLI, so that
-credential carries every permission the job grants — grant that
-job nothing but reads plus `copilot-requests: write`, as the
-example below does, or the model credential becomes
-write-capable.
-
-Labels travel over the separate GitHub App token described in
-[README.md](README.md) whichever route you pick, and the workflow
-reads the two from different environment variables so the
-repository credential never reaches the Copilot backend. That is
-a routing guarantee, not a scope one: on route B the model
-credential genuinely cannot touch a repository, while on route A
-it carries whatever the calling job granted. Grant such a job
-reads and nothing more — the workflow receives the secret already
-evaluated and cannot narrow it.
-
-## Route A: the caller's `GITHUB_TOKEN`
-
-### 1. Confirm the organisation policy
-
-Copilot CLI usage billed to an organisation depends on one
-policy. GitHub enables that policy by default for organisations
-that allow Copilot CLI.
-
-1. Open the organisation's Copilot policy settings.
-2. Under **Copilot CLI**, look for **Allow use of Copilot CLI
-   billed to the organization** and turn it on.
-
-This policy is separate from licensing. An organisation needs no
-Copilot seats for this route: usage meters to the organisation
-directly rather than drawing on anyone's entitlement. Enterprises
-that license through one organisation and work in others need the
-policy in the working organisation alone.
-
-### 2. Grant the permission and pass the token
-
-The permission goes on the **calling** job, and the token passes
-in as the secret:
 
 ```yaml
 jobs:
@@ -113,159 +69,96 @@ jobs:
     permissions:
       issues: read
       contents: read
-      # Authorises Copilot model requests; carries no repository
-      # access of its own.
-      copilot-requests: write
-    uses: lfreleng-actions/github-issues-triage/.github/workflows/issues-triage.yaml@<commit-sha>
+    # Replace with a reviewed release commit SHA, not a tag object.
+    # yamllint disable-line rule:line-length
+    uses: lfreleng-actions/github-issues-triage/.github/workflows/issues-triage.yaml@<commit-sha>  # vX.Y.Z
     with:
       org: 'your-org'
       engine: 'copilot'
       dry_run: true
     secrets:
-      copilot_token: ${{ secrets.GITHUB_TOKEN }}
+      copilot_token: ${{ secrets.COPILOT_CLI_TOKEN }}
 ```
 
-By design, the reusable workflow does not declare
-`copilot-requests` itself. A called workflow can narrow the
-caller's permissions but never widen them, so declaring it there
-would fail every caller running a different engine. Passing the
-token in as a named secret leaves the decision with the consumer
-that wants this engine.
+<!-- markdownlint-enable MD013 -->
 
-> **⚠️ Route A remains unproven.**
-> The reusable workflow's own job declares `issues: read` and
-> `contents: read`, which narrows the `GITHUB_TOKEN` that job
-> receives. The reasoning that route A survives anyway is that
-> the secret carries a string the **caller** evaluated, and the
-> downgrade rule governs the token a called workflow receives
-> rather than a value handed to it as a named secret — the
-> pattern GitHub's own reusable-workflow documentation shows.
-> Sound, but no run has confirmed it for this scope. Route B
-> avoids the question entirely. See section 13.5 of
-> [`../development/DESIGN.md`](../development/DESIGN.md).
+The reusable workflow gives Propose's job-native token
+`contents: read` and no other permissions. No action in that job
+receives the App key or an installation token. Prepare uses the App
+to build the packet; Apply mints its token after verifying evidence.
 
-### 3. Cost control
+Override the model with the `model` input. An empty value selects
+`claude-sonnet-5`; check your entitlement before choosing another.
 
-Organisation-metered usage bypasses per-user Copilot budgets,
-because the spend attaches to no individual. Attach the
-organisation to a
-**cost centre** and budget against that instead, and watch the
-organisation's billing dashboard while the engine is new.
+## Check before live use
 
-## Route B: a fine-grained PAT
+Copilot is the active validation target. The local suite tests
+contracts, not remote authentication or live writes:
 
-### 1. Create the token
-
-1. Go to
-   <https://github.com/settings/personal-access-tokens/new>.
-2. Set **Resource owner** to your **personal account**. The
-   Copilot Requests permission sits under **Account
-   permissions**, which GitHub hides when an organisation owns
-   the token — pick an organisation and the permission vanishes
-   from the page.
-3. Grant the **Copilot requests** permission.
-4. Grant **no repository permissions**. This engine needs the
-   token for model access alone, and withholding repository
-   access is the point of the split.
-5. Set the shortest expiry you can live with, and copy the value.
-
-GitHub publishes a link that preselects the permission:
-<https://github.com/settings/personal-access-tokens/new?name=Copilot+requests+token&user_copilot_requests=write>
-
-The token has to be fine-grained. The CLI inspects the value and
-refuses a classic PAT outright, whatever scopes it carries:
-`The COPILOT_GITHUB_TOKEN environment variable contains a classic
-PAT.`
-
-Remember that the expiry is a scheduled outage. A 30-day token
-breaks the weekday schedule in 30 days, on a weekday morning,
-with no warning beforehand. Section 13.6 of
-[`../development/DESIGN.md`](../development/DESIGN.md) tracks the
-search for a credential without that failure mode.
-
-The token's owner must hold an active Copilot seat or
-subscription: requests draw on that person's entitlement, and
-their licence decides which models the session can reach.
-
-### 2. Store it
-
-Add the value as a repository secret named `COPILOT_CLI_TOKEN`
-(**Settings** > **Secrets and variables** > **Actions**), then
-pass it through without granting `copilot-requests`:
-
-```yaml
-secrets:
-  copilot_token: ${{ secrets.COPILOT_CLI_TOKEN }}
+```bash
+uv run python -B -m unittest discover -s tests -v
+prek run --all-files
 ```
 
-The callers in this repository use this route today. Route A
-remains the better choice, but neither the pinned actionlint nor
-the workflow schema used by `check-jsonschema` recognises the
-`copilot-requests` scope yet, so declaring it locally fails the
-repository's own linting gate. Revisit once both learn it.
-
-## Choose a model
-
-The default is **`claude-sonnet-5`**. Its predecessor,
-`claude-sonnet-4.6`, retires from Copilot Business and Enterprise
-on 2026-09-01. Override the default per run with the `model`
-input:
-
-```yaml
-with:
-  engine: 'copilot'
-  model: 'claude-haiku-4.5'
-```
-
-## Verify
+For further validation, a maintainer can run the manual dry-run
+against a reviewed, trusted ref:
 
 ```bash
 gh workflow run testing.yaml -f engine=copilot
 ```
 
+The three-job Copilot dry-run passed; see
+[Design §11](../development/DESIGN.md#11-rollout-and-validation)
+for run evidence and limits. `testing.yaml` passes no App credentials,
+so live App token minting, its field/type permissions and real writes
+remain untested. A controlled organisation-App run must test those
+before enabling scheduled writes. Claude and Gemini are outside
+active validation.
+
+Inspect the preparation evidence, separate session artefact and
+final results. Check proposal/apply outcomes alongside the label
+diff: a failed apply can leave partial writes, and the report does
+not observe priority/type changes. See shared setup for recovery.
+
+## Containment and evidence
+
+The session reads `issue-packet.json`, including issue bodies and
+existing labels, types and priorities. “Offline” describes the
+issue-data source, not a network-isolated runner: the model still
+uses the network. Copilot allows `cat`/`jq` reads, denies `gh`/`git`
+and the write tool, and disables built-in MCPs and custom
+instructions. Those approval rules and secret redaction are not a
+sandbox. Treat packet contents and session output as untrusted, and
+review model data handling and artefact access.
+
+Prepared evidence and session output have **7-day retention**.
+The session artefact contains `prompt.md`, `session-summary.md`
+and `copilot-logs/`. Apply extracts it into `untrusted-session/`,
+then copies a regular, non-symlink summary of at most 8 MiB, excluding
+other files. Raw logs never enter the trusted report bundle, with **90-day
+retention**. The report does not ingest session logs for cost or
+turn telemetry.
+
 ## Egress
 
-A session reaches the Copilot backend at
-`api.githubcopilot.com:443`. Installing the CLI beforehand reaches
-`registry.npmjs.org:443` and the Node distribution host that
-`actions/setup-node` uses.
-
-Treat that list as a starting point rather than a finished
-allow-list. The dependable way to build one is a run with
-`egress_policy: audit`, which records every outbound call without
-blocking; harvest the recorded endpoints, then switch to
-`block`. A hand-written list that misses an install-time endpoint
-fails the run before the session starts.
+The model backend includes `api.githubcopilot.com:443`; installation
+also needs `registry.npmjs.org:443` and the Node distribution host.
+Treat these as starting points, not a verified complete allow-list
+for this layout. Use audit mode to collect endpoints before block
+mode. Audit records traffic without blocking it.
 
 ## Failure modes
 
 <!-- markdownlint-disable MD013 -->
 
-| Symptom | Cause | Fix |
-| ------- | ----- | --- |
-| `Agent runs with engine 'copilot' need the copilot_token secret` | No secret reached the workflow | Add the secret, or pass the caller's token through |
-| `The copilot engine cannot apply labels` | A run from before section 13.7; the guard no longer exists | Update to a current version of the workflow |
-| CLI rejects the token on route A | The organisation policy is off, or the grant did not survive the hand-off | Enable the policy; otherwise fall back to route B |
-| CLI rejects the token on route B | The PAT lacks Copilot Requests, has expired, or its owner holds no Copilot seat | Reissue the PAT, or assign its owner a seat |
-| `COPILOT_GITHUB_TOKEN … contains a classic PAT` | A classic PAT reached the CLI, which refuses them regardless of scope | Issue a fine-grained PAT instead |
-| Session stalls until the step timeout | The CLI waited on an interactive prompt | Capture the run's artefact bundle and report it |
-| Every agent command reports `Permission denied and could not request permission from user` | The tool grants no longer match what the CLI expects | Compare against section 13.2 of [`../development/DESIGN.md`](../development/DESIGN.md); the CLI approves `gh` on its first-level subcommand |
-| Agent `gh` commands report missing authentication | The seeded `gh` configuration directory did not reach the session | Check the `GH_CONFIG_DIR` set-up in the agent step |
+| Symptom | Check or recovery |
+| ------- | ----------------- |
+| PAT format guard fails | Supply a `github_pat_` PAT through `copilot_token`, then review its permissions. |
+| CLI authentication or model failure | Check expiry, Copilot Requests, owner entitlement and model access; prefix acceptance proves none of these. |
+| Session tries to use `gh` | The session must use the offline packet; do not add an App token to make the command work. |
+| Missing or malformed summary | Inspect the separate session artefact; Apply must not consume failed-session proposals. |
+| Missing evidence ID or digest mismatch | Stop and investigate provenance; do not substitute an artefact with a matching name. |
+| Live configuration read failure | Fix App access or the API failure; live mode must fail rather than drop unreadable configuration. |
+| Partial writes | Inspect current state and `apply-result.json`; use targeted recovery, often `retriage: true`, without overwriting human Priority. |
 
 <!-- markdownlint-enable MD013 -->
-
-No run has yet confirmed route A end to end. The reasoning that a
-token handed over as a named secret keeps the caller's grant
-holds, and matches GitHub's own reusable-workflow examples, but no
-run has proved it for this scope. It fails closed — the CLI
-rejects the token, the step fails, and the artefact bundle
-survives.
-
-## Session evidence
-
-The engine writes CLI logs and a shared session transcript into
-the artefact bundle. Cost and turn figures in the report may come
-out blank, because the report parses a Claude-shaped execution
-log; the parser drops unmapped fields rather than failing. See
-section 13 of
-[`../development/DESIGN.md`](../development/DESIGN.md).

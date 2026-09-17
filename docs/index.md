@@ -5,17 +5,17 @@ SPDX-FileCopyrightText: 2026 The Linux Foundation
 
 # GitHub Issues Triage
 
-Scheduled AI triage of GitHub issues. A reusable workflow scans an
-organisation's open issues, runs an agent session that applies
-category labels per a versioned policy prompt, and attaches full run
-evidence to the workflow run.
+Scheduled AI triage of GitHub issues. A reusable workflow prepares
+an offline issue packet, runs an agent to propose labels, priority
+and type, then validates and applies proposals on a separate runner.
+Snapshots and a diff report record observed label changes, not the
+agent's claims.
 
-## Three engines, one pipeline
+## Engines
 
-The agent session is the single provider-specific step. Snapshots,
-exclusion filtering, the policy prompt, proposal validation and
-application, the diff report, and the artefact bundle stay the
-same whichever engine runs:
+Copilot is the active validation target for the three-job workflow.
+Claude and Gemini remain selectable, but their current paths still
+need verification.
 
 <!-- markdownlint-disable MD013 -->
 
@@ -23,63 +23,77 @@ same whichever engine runs:
 | ------ | -------------- | ---------- | ----- |
 | Anthropic Claude | `claude` (the default) | `anthropic_api_key` | [ANTHROPIC.md](setup/ANTHROPIC.md) |
 | Google Gemini | `gemini` | `gemini_api_key` | [GOOGLE.md](setup/GOOGLE.md) |
-| GitHub Copilot | `copilot` | `copilot_token` | [GITHUB.md](setup/GITHUB.md) |
+| GitHub Copilot | `copilot` | Fine-grained `copilot_token` PAT for model access | [GITHUB.md](setup/GITHUB.md) |
 
 <!-- markdownlint-enable MD013 -->
 
 ## How a run works
 
 ```text
-snapshot (before) -> agent session -> snapshot (after)
-                                        -> diff -> report + summary
+prepare (trusted)
+  | snapshot, exclusions, issue packet
+  | commit SHA, evidence ID, digests
+  v
+propose (untrusted, separate runner)
+  | offline proposal; no App key or installation token
+  v
+apply (trusted, separate runner)
+  verify original evidence -> check proposal -> write -> report
 ```
 
-1. Capture the organisation's open-issue state as JSON
-2. Skip the agent session when zero unlabelled issues exist
-3. Run the selected engine with read and label `gh` verbs, plus the
-   policy prompt
-4. Capture the state again, diff, and report observed label movement
-   — never the agent's own claims — to the step summary
-5. Upload the artefact bundle (snapshots, session evidence, prompt,
-   report) with 90-day retention, even when the session fails
+Prepare reads issue bodies, existing labels, types and priorities
+into the packet. Propose needs no GitHub issue API access; its
+job-native `GITHUB_TOKEN` grants `contents: read` and no other
+permissions. Apply takes
+trusted provenance directly from Prepare, not through Propose.
+It downloads the session into a separate directory and copies a
+bounded regular summary for validation, excluding other files.
 
-The report describes what changed, not what the agent said it
-changed. That distinction is the point: a session that claims a label
-it never applied shows up as a difference between the two snapshots.
+Prepared evidence and session artefacts have **7-day retention**.
+Final results have **90-day retention** and exclude raw session
+logs. Downloads use producer artefact IDs, so rerunning Apply without
+its producers can reuse available evidence. A run/attempt/UUID namespace distinguishes
+reusable and matrix invocations; final names add the current attempt.
+
+Apply requires successful preparation and no cancellation. Writes
+also require a successful proposal job and accepted summary. A
+failed or skipped session can still get a report after evidence
+verification; the report requires snapshot-step success before
+using after-state. The report observes labels, not priority/type
+changes; inspect `apply-result.json` for those outcomes.
 
 ## Where to start
 
-- **Running the pipeline against your own organisation** —
-  [Setup](setup/README.md) covers the shared GitHub App that performs
-  every label write, then the credential each engine needs.
-- **Understanding why the pipeline works this way** —
-  [Design](development/DESIGN.md) records the architecture, the
-  containment model, and the reasoning behind each engine's
-  integration.
-- **Calling the reusable workflow** — the
-  [repository README](https://github.com/lfreleng-actions/github-issues-triage#consuming-the-reusable-workflow)
-  carries the consumption example and the full input reference.
+- [Setup](setup/README.md) — App permissions, Copilot PAT and
+  dry-run validation.
+- [Design §13.7](development/DESIGN.md) — trust boundaries, failure
+  handling and recovery.
+- [Repository README](https://github.com/lfreleng-actions/github-issues-triage#consuming-the-reusable-workflow)
+  — caller examples and input reference.
 
 ## Safety model in brief
 
-Dry-run is the default: consumers opt in to live labelling. The
-tool policy grants the agent read verbs of `gh`, in every mode;
-it proposes, and a **separate job** validates each proposal and
-performs the writes. The repository credential the session holds
-is an `issues: read` App token, so it cannot label through its
-own grant. Every write travels over a second App token minted
-after the session's job has ended, on a runner that job never
-touched, separate from the model credential; the Anthropic and
-Gemini keys carry no GitHub permissions at all. Issue text
-counts as data, never instructions.
+Dry-run is the default; live runs require an organisation App.
+Public user-owned targets require dry-run. Copilot requires
+Copilot Requests on a fine-grained PAT with no repository permissions;
+the workflow rejects caller-native `GITHUB_TOKEN` for authentication.
+A `github_pat_` prefix is not proof of the token's grants or validity.
 
-Containment differs by engine, so the worst case does too. The
-Claude and Gemini engines hold the agent to a tool allow-list the
-harness enforces, and a mislabelled issue is the ceiling. The
-Copilot engine's allow-list is an approval policy rather than a
-filter, so the CLI auto-approves shell reads beyond the `gh`
-verbs above, and one of its routes reuses the calling job's
-`GITHUB_TOKEN`. That bounds what the *session* can reach; a
-separate bound governs what gets written, because no engine
-applies anything itself — see
-[Design §13.7](development/DESIGN.md).
+The applier checks scope, exclusions, snapshot membership and live
+issue state. It skips any issue with an existing Priority and
+rejects agent proposals for `Urgent`. Live organisation configuration
+read failures are fatal; dry-run alone allows known absence or
+permission denial. A search reaching 1,000 results fails before
+exclusion filtering can conceal truncation.
+
+Workflow concurrency serializes all three jobs per caller repository
+and target owner. Pending runs may supersede each other; there is
+no FIFO queue or cross-caller lock. Writes are nontransactional and
+live checks do not prevent races with human edits. Inspect partial
+writes before targeted recovery; never overwrite human Priority to
+force replay. Tool approval rules and redaction are not a sandbox.
+
+The three-job Copilot dry-run and both secretless PR invocations
+passed; see [Design §11](development/DESIGN.md#11-rollout-and-validation)
+for run evidence and limits. Live App token minting and real writes
+remain untested.

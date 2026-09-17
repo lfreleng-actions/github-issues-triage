@@ -31,25 +31,47 @@ mkdir -p "$outdir"
 excludes=""
 if [ -n "${EXCLUDE_REPOS:-}" ]; then
   excludes="$(printf '%s' "$EXCLUDE_REPOS" | tr ',' '\n')"
-elif [ -n "${EXCLUDE_FILE:-}" ] && [ -f "${EXCLUDE_FILE}" ]; then
-  excludes="$(sed -e 's/#.*$//' -e 's/[[:space:]]//g' \
-    "${EXCLUDE_FILE}" | grep -v '^$' || true)"
+elif [ -n "${EXCLUDE_FILE:-}" ]; then
+  if [ ! -f "$EXCLUDE_FILE" ]; then
+    echo "Snapshot: configured EXCLUDE_FILE is not a regular file" >&2
+    exit 1
+  fi
+  excludes="$(sed 's/#.*$//' "$EXCLUDE_FILE")"
 fi
-printf '%s\n' "$excludes" > "$outdir/excluded-repos.txt"
+excludes="$(printf '%s\n' "$excludes" | sed \
+  -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' -e '/^$/d' \
+  | tr '[:upper:]' '[:lower:]')"
 
-args=(--owner "$ORG" --state open --limit 1000
+# Stage beside the destination so the final snapshot rename is atomic.
+# Failed queries leave any previously published evidence untouched.
+tmpdir="$(mktemp -d "$outdir/.snapshot.XXXXXX")"
+trap 'rm -rf -- "$tmpdir"' EXIT
+printf '%s\n' "$excludes" > "$tmpdir/excluded-repos.txt"
+
+limit=1000
+args=(--owner "$ORG" --state open --limit "$limit"
   --json 'repository,number,title,url,labels,createdAt,updatedAt')
 if [ -n "${REPOSITORY:-}" ]; then
   args+=(--repo "$ORG/$REPOSITORY")
 fi
 
-# Stream straight into jq: no unfiltered intermediate file ever
-# touches the artefact directory, so a failure part-way cannot leak
-# excluded repositories into the uploaded bundle.
-gh search issues "${args[@]}" | jq --arg excl "$excludes" '
-  ($excl | split("\n") | map(select(length > 0))) as $list
-  | map(select(.repository.name as $n | ($list | index($n)) | not))
-' > "$outfile"
+# No unfiltered intermediate file touches disk. Slurping requires
+# exactly one JSON array, even when gh exits successfully without data.
+# Check the search ceiling before exclusions can disguise truncation.
+gh search issues "${args[@]}" | jq -e -s \
+  --arg excl "$excludes" --argjson limit "$limit" '
+  if length != 1 or (.[0] | type) != "array" then
+    error("snapshot response must be a single JSON array")
+  else .[0] end
+  | if length >= $limit then
+      error("snapshot reached the \($limit)-result search limit; restrict the scan")
+    else . end
+  | ($excl | split("\n") | map(select(length > 0))) as $list
+  | map(select(.repository.name | ascii_downcase as $n
+      | ($list | index($n)) | not))
+' > "$tmpdir/snapshot.json"
 
-count="$(jq 'length' "$outfile")"
+count="$(jq 'length' "$tmpdir/snapshot.json")"
+mv -- "$tmpdir/excluded-repos.txt" "$outdir/excluded-repos.txt"
+mv -- "$tmpdir/snapshot.json" "$outfile"
 echo "Snapshot: $count open issue(s) -> $outfile"
