@@ -6,13 +6,22 @@
 #
 # Scans the open issues of an organisation (or a single repository),
 # runs an agent session — Claude Code, the Gemini CLI, or the
-# GitHub Copilot CLI, selected by the engine input — that applies
-# category labels per the bundled prompt/triage.md policy, and
-# attaches full run evidence to the workflow run: before/after issue
+# GitHub Copilot CLI, selected by the engine input — that *proposes*
+# category labels, priority and type per the bundled
+# prompt/triage.md policy, and attaches full run evidence to the
+# workflow run: before/after issue
 # snapshots, engine-specific session evidence (Claude: a turn-by-turn
 # transcript; Gemini: telemetry plus the session summary; Copilot:
 # CLI logs plus the shared session transcript), and a diff-based
 # report that also lands in the step summary.
+#
+# Two jobs, and the boundary between them is load-bearing. The
+# propose job scans and runs the session, holding nothing that can
+# write. The apply job validates the proposal and performs the
+# writes on a separate runner, from a fresh checkout, against a
+# token minted after the first job has ended. A session's shell
+# runs unsandboxed as the same user, so anything sharing its job
+# shares its workspace and its process table (DESIGN.md 13.2, 13.7).
 #
 # Consumers outside this organisation supply their own tokens: a
 # model credential matching the engine, plus a GitHub App (client id
@@ -141,23 +150,47 @@ on:
 permissions: {}
 
 jobs:
-  triage:
-    name: 'Triage'
+  # Scan, assemble the prompt, run the session. This job mints no
+  # write-capable credential and writes nothing to GitHub: it
+  # produces two artefacts and stops.
+  #
+  # "Mints" rather than "holds", because one credential arrives
+  # already evaluated. On the Copilot engine the copilot_token
+  # secret may be a caller GITHUB_TOKEN carrying issues:write
+  # (DESIGN.md 13.3), and this workflow cannot narrow a secret a
+  # consumer passed in. The guarantee is about what the pipeline
+  # issues, not about every value it receives.
+  propose:
+    name: 'Propose'
     runs-on: 'ubuntu-latest'
     timeout-minutes: 30
     permissions:
-      # Live labelling always uses the GitHub App token (see the
-      # guard step), which carries its own permissions, never this
-      # fallback GITHUB_TOKEN grant.
-      issues: read  # Snapshots and dry-run reads
+      # Live labelling always uses the GitHub App token minted in
+      # the apply job, which carries its own permissions, never
+      # this fallback GITHUB_TOKEN grant.
+      issues: read  # Snapshots and agent reads
       contents: read  # Asset checkout and metadata reads
     # Serialise runs here, not solely in callers: two overlapping
-    # sessions would classify the same snapshot and apply
+    # sessions would classify the same snapshot and propose
     # conflicting labels. Scoped per caller repository and target
     # org; queued, never cancelled.
     concurrency:
       group: "issues-triage-${{ github.repository }}-${{ inputs.org }}"
       cancel-in-progress: false
+    outputs:
+      # Facts about the run, crossing to the apply job. Never a
+      # credential: that job mints its own, once this one has
+      # ended and on a machine this one never touched.
+      #
+      # The commit the assets checkout actually resolved to, not
+      # the caller's assets_ref, which may name a branch: one
+      # that moved during the session would otherwise hand the
+      # apply job different code to run against the write token.
+      assets_sha: "${{ steps.pinned.outputs.sha }}"
+      snapshot: "${{ steps.before.outcome }}"
+      pending: "${{ steps.before.outputs.pending }}"
+      # yamllint disable-line rule:line-length
+      proposed: "${{ steps.agent.outcome == 'success' || steps.agent-gemini.outcome == 'success' || steps.agent-copilot.outcome == 'success' }}"
     steps:
       # Load an egress allow-list for block mode. In audit mode the
       # step does not run and harden-runner records outbound calls
@@ -298,6 +331,18 @@ jobs:
           path: 'triage-assets'
           persist-credentials: false
 
+      # Record the commit that checkout landed on, so the apply
+      # job can take the same one. assets_ref may name a branch
+      # or a movable tag, and a session lasts twenty minutes --
+      # ample for a ref to advance underneath the run and leave
+      # the two jobs executing different code.
+      - name: 'Pin the assets commit 📌'
+        id: pinned
+        run: |
+          sha="$(git -C triage-assets rev-parse HEAD)"
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+          echo "Assets commit: $sha"
+
       # Without an App the job's token is issues:read, which the
       # guard above pairs with dry-run mode; the requested scope
       # passes through unchanged.
@@ -315,6 +360,28 @@ jobs:
             artefacts/before.json)
           echo "pending=$pending" >> "$GITHUB_OUTPUT"
           echo "Unlabelled issues pending: $pending"
+
+      # Uploaded before the session starts, never after it ends.
+      # An artefact is immutable once uploaded, so this copy sits
+      # beyond the reach of anything the agent does next -- and
+      # the apply job checks every proposal against it.
+      #
+      # Passing it through the workspace instead would hand a
+      # session that can write files the power to rewrite the
+      # very bound its own proposal is measured against, along
+      # with the exclusion list naming the repositories triage
+      # must leave alone (DESIGN.md section 13.7).
+      - name: 'Seal the pre-session evidence 🔒'
+        if: steps.before.outcome == 'success'
+        # yamllint disable-line rule:line-length
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: "triage-evidence-${{ github.run_id }}"
+          path: |
+            artefacts/before.json
+            artefacts/excluded-repos.txt
+          retention-days: 7
+          if-no-files-found: 'error'
 
       # Skip the (costly) agent session when the backlog is clear.
       # Retriage mode always runs it: labelled issues are in scope.
@@ -712,13 +779,22 @@ jobs:
                   continue
               message = event.get("message")
               if event.get("type") == "assistant" and isinstance(message, dict):
-                  for block in message.get("content") or []:
+                  # Join the text blocks rather than keeping the
+                  # last. A response can arrive split across
+                  # several, and taking one would slice the
+                  # proposal -- losing the opening fence while
+                  # still looking like a successful run.
+                  blocks = [
+                      block["text"]
+                      for block in message.get("content") or []
                       if (
                           isinstance(block, dict)
                           and block.get("type") == "text"
                           and isinstance(block.get("text"), str)
-                      ):
-                          final = block["text"]
+                      )
+                  ]
+                  if blocks:
+                      final = "".join(blocks)
           if final:
               pathlib.Path("artefacts/session-summary.md").write_text(
                   final, encoding="utf-8"
@@ -742,6 +818,125 @@ jobs:
             echo "Session summary already present in artefacts/"
           fi
 
+      # The session's own output, the proposal among it. Kept in
+      # a separate artefact from the evidence above, with no file
+      # in common, so the apply job draws the two from different
+      # places and trusts them differently.
+      - name: 'Preserve session output 📤'
+        if: always() && steps.before.outcome == 'success'
+        # yamllint disable-line rule:line-length
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: "triage-session-${{ github.run_id }}"
+          path: |
+            artefacts/prompt.md
+            artefacts/session-summary.md
+            artefacts/session-transcript.json
+            artefacts/gemini-telemetry.json
+            artefacts/copilot-logs/
+          retention-days: 7
+          if-no-files-found: 'warn'
+
+  # Validate the proposal and perform the writes, on a runner the
+  # session never touched.
+  #
+  # The job boundary is the whole point. A session's shell runs
+  # unsandboxed as the same user (DESIGN.md section 13.2), so
+  # whatever shares its job shares three things with it: the
+  # workspace the applier would run from, the process table, and
+  # any credential minted while one of its processes is still
+  # alive -- and the runner reaps orphans when the job ends, not
+  # when the step does. Ordering steps within one job closed none
+  # of those. A second job closes all three at once.
+  #
+  # What crosses the boundary is data, never code or credentials.
+  # The scripts arrive from a fresh checkout of the same
+  # immutable ref, the snapshot from an artefact sealed before
+  # the session began, and the write token is minted here.
+  apply:
+    name: 'Apply'
+    needs: 'propose'
+    # Runs even where the session failed, so the report still
+    # gets built and the run still explains itself. The apply
+    # step carries its own guard.
+    if: always() && needs.propose.outputs.snapshot == 'success'
+    runs-on: 'ubuntu-latest'
+    timeout-minutes: 15
+    permissions:
+      issues: read  # After-snapshot reads; writes use the App token
+      contents: read  # Asset checkout and metadata reads
+    # A group of its own rather than the proposing job's. Sharing
+    # one would leave this queued behind some other run's agent
+    # session; what must not overlap an apply is another apply.
+    concurrency:
+      # yamllint disable-line rule:line-length
+      group: "issues-triage-apply-${{ github.repository }}-${{ inputs.org }}"
+      cancel-in-progress: false
+    steps:
+      - name: 'Load egress allow-list'
+        if: inputs.egress_policy == 'block'
+        # yamllint disable-line rule:line-length
+        uses: lfreleng-actions/harden-runner-block-action@805eedb0508c07714b61887a2b87a5c4bbeff22a # v0.12.1
+        with:
+          config: "${{ inputs.egress_allow_config }}"
+
+      - name: 'Harden runner'
+        # yamllint disable-line rule:line-length
+        uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1 # v2.21.1
+        with:
+          egress-policy: "${{ inputs.egress_policy }}"
+          allowed-endpoints: >
+            ${{ env.CONNECTION_ALLOW_LIST }}
+
+      # The exact commit the session ran against, taken from git.
+      # A SHA, never the caller's ref: that may have moved while
+      # the session ran.
+      - name: 'Checkout triage assets 🛎️'
+        # yamllint disable-line rule:line-length
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: "${{ inputs.assets_repository }}"
+          ref: "${{ needs.propose.outputs.assets_sha }}"
+          path: 'triage-assets'
+          persist-credentials: false
+
+      # The snapshot and exclusion list as they stood before the
+      # session ran.
+      - name: 'Fetch sealed evidence 📥'
+        # yamllint disable-line rule:line-length
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
+        with:
+          name: "triage-evidence-${{ github.run_id }}"
+          path: 'artefacts'
+
+      # The proposal and the transcript. Untrusted input, which
+      # is why it lands after the evidence and shares no filename
+      # with it. A session that failed may have left nothing, and
+      # that must not stop the report.
+      - name: 'Fetch session output 📥'
+        continue-on-error: true
+        # yamllint disable-line rule:line-length
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
+        with:
+          name: "triage-session-${{ github.run_id }}"
+          path: 'artefacts'
+
+      # Read-only, for the after-snapshot. Minted again here
+      # rather than carried over: a token is not something this
+      # design passes between jobs.
+      - name: 'Mint GitHub App token 🔑'
+        id: app-token
+        if: inputs.github_app_client_id != ''
+        # yamllint disable-line rule:line-length
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          client-id: "${{ inputs.github_app_client_id }}"
+          private-key: "${{ secrets.github_app_private_key }}"
+          owner: "${{ inputs.org }}"
+          repositories: "${{ inputs.repository }}"
+          permission-issues: 'read'
+          permission-metadata: 'read'
+
       # A second token for the apply step. Narrowed, but to four
       # grants rather than two: the applier reads the
       # organisation's issue fields and types to validate priority
@@ -757,21 +952,21 @@ jobs:
       # installation grant, which is worse.
       #
       # Minted for dry runs too, because validation needs the same
-      # reads. The agent never sees it: its step finished before
-      # this one starts.
+      # reads. No session can reach it: the job holding them has
+      # ended, and its processes with it.
       #
       # issue_fields and issue_types are organisation permissions,
       # so this mint needs an organisation owner. A user-owned
       # installation cannot grant them and the request fails.
-      # Pairing that with the live-run guard above, which refuses
-      # an App-less live run outright, leaves a user owner dry-run
-      # only -- as the org input says. Degrading here instead
-      # would be worse: a live run that quietly dropped every
-      # priority would look like it worked.
+      # Pairing that with the live-run guard in the propose job,
+      # which refuses an App-less live run outright, leaves a
+      # user owner dry-run only -- as the org input says.
+      # Degrading here instead would be worse: a live run that
+      # quietly dropped every priority would look like it worked.
       - name: 'Mint App token for the apply step 🔐'
         id: app-token-write
         # yamllint disable-line rule:line-length
-        if: ${{ always() && inputs.github_app_client_id != '' && steps.prompt.outcome == 'success' }}
+        if: ${{ inputs.github_app_client_id != '' && needs.propose.outputs.proposed == 'true' }}
         # yamllint disable-line rule:line-length
         uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
         with:
@@ -789,13 +984,12 @@ jobs:
           permission-issue-fields: 'read'
           permission-issue-types: 'read'
 
-      # The agent proposes; this applies. Keeping the two apart
-      # means the repository credential a session holds is
-      # read-only, so a harness whose tool containment is approval
-      # rather than enforcement (DESIGN.md section 13.2) cannot
-      # write through it. Everything the agent emitted is
-      # revalidated here against the run's own scope before it
-      # reaches GitHub.
+      # The agent proposes; this applies. The two sit in separate
+      # jobs, so the credential minted above never coexists with
+      # a session on one machine, and the script below comes from
+      # git rather than from anywhere a session could write.
+      # Everything the agent emitted is revalidated here against
+      # the run's own scope before it reaches GitHub.
       #
       # This step also carries priority and type. Priority needs
       # the REST issue-field endpoint, which gh issue edit cannot
@@ -806,14 +1000,8 @@ jobs:
         # Only a session that finished has a proposal worth
         # trusting. A failed or timed-out one may have left a
         # partial transcript, and applying half a plan is worse
-        # than applying none. Evidence preservation above runs
-        # regardless; this does not.
-        # yamllint disable rule:line-length
-        if: >-
-          ${{ steps.agent.outcome == 'success' ||
-          steps.agent-gemini.outcome == 'success' ||
-          steps.agent-copilot.outcome == 'success' }}
-        # yamllint enable rule:line-length
+        # than applying none.
+        if: needs.propose.outputs.proposed == 'true'
         env:
           # yamllint disable-line rule:line-length
           GH_TOKEN: "${{ steps.app-token-write.outputs.token || steps.app-token.outputs.token || github.token }}"
@@ -844,7 +1032,7 @@ jobs:
             "${extra[@]}"
 
       - name: 'Snapshot issues (after) 📸'
-        if: always() && steps.before.outcome == 'success'
+        if: always()
         env:
           GH_TOKEN: "${{ steps.app-token.outputs.token || github.token }}"
           ORG: "${{ inputs.org }}"
@@ -857,7 +1045,7 @@ jobs:
       # The report diffs the snapshots: it shows observed label
       # movement, never the agent's own claims about what it did.
       - name: 'Build report 📊'
-        if: always() && steps.before.outcome == 'success'
+        if: always()
         env:
           DRY_RUN: "${{ inputs.dry_run }}"
         run: |

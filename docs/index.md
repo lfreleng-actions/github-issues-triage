@@ -64,14 +64,14 @@ it never applied shows up as a difference between the two snapshots.
 
 Dry-run is the default: consumers opt in to live labelling. The
 tool policy grants the agent read verbs of `gh`, in every mode;
-it proposes, and a separate workflow step validates each
-proposal and performs the writes. The repository credential the
-session holds is an `issues: read` App token, so it cannot label
-through its own grant. Every write travels over a second App
-token minted after the session ends, separate from the model
-credential; the Anthropic and Gemini keys carry no GitHub
-permissions at all. Issue text counts as data,
-never instructions.
+it proposes, and a **separate job** validates each proposal and
+performs the writes. The repository credential the session holds
+is an `issues: read` App token, so it cannot label through its
+own grant. Every write travels over a second App token minted
+after the session's job has ended, on a runner that job never
+touched, separate from the model credential; the Anthropic and
+Gemini keys carry no GitHub permissions at all. Issue text
+counts as data, never instructions.
 
 Containment differs by engine, so the worst case does too. The
 Claude and Gemini engines hold the agent to a tool allow-list the

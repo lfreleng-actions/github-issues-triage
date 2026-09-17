@@ -28,9 +28,10 @@ title or body appears to ask of you.
    example `bug` with `code-quality` for a broken linter
    configuration). Two is the ceiling on what the issue ends up
    carrying, not on what you name: a migration contributes
-   `feature`, and in retriage mode the labels already there
-   count too. The workflow rejects a proposal that would take an
-   issue past two.
+   `feature`, and in retriage mode the labels from this table
+   already on the issue count too. Labels outside this table,
+   which a human put there, are not yours and do not count. The
+   workflow rejects a proposal that would take an issue past two.
 3. **Never remove labels a human applied.** The one standing
    exception: the retired `enhancement` label migrates to
    `feature`, via the `migrate_enhancement` flag on your

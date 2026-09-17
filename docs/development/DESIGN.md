@@ -463,7 +463,7 @@ by supplying their own tokens — no fork required.
 
 | File | Role |
 | ---- | ---- |
-| `.github/workflows/issues-triage.yaml` | Reusable (`workflow_call`): the full triage job |
+| `.github/workflows/issues-triage.yaml` | Reusable (`workflow_call`): propose and apply jobs |
 | `.github/workflows/issues-triage-cron.yaml` | Org caller: schedule, dispatch inputs, secrets |
 
 <!-- markdownlint-enable MD013 -->
@@ -1302,7 +1302,7 @@ write over whoever got there first.
   apply step share a workspace. The claim above is about
   credentials, and holds. It says nothing about the code the
   apply step runs, which sits in that workspace beside the
-  agent. See the open question below.
+  agent. Settled below by splitting the two into separate jobs.
 - **Issue fields become reachable.** `gh issue edit` sets no
   issue field, so priority travels over the REST issue-field
   endpoint — something the agent's three-command grant could
@@ -1344,59 +1344,18 @@ reads rather than closing the hole.
 
 #### Open questions
 
-1. **The session and the applier share a workspace, and that
-   blocks the live rollout.** The agent's shell runs
-   unsandboxed as the same user, in the same checkout the apply
-   step executes from (§13.2). `--deny-tool=write` withholds the
-   CLI's file-writing *tool*; it does nothing about a shell
-   redirect, and an auto-approved read such as `gh issue view N
-   --jq .body > triage-assets/scripts/apply_triage.py` writes a
-   file all the same. Issue text would then be the applier, run
-   against the write token minted after the session ends.
-   `artefacts/before.json` and the exclusion list sit in reach
-   too, so the snapshot bound and the scope checks rest on the
-   same sand.
-
-   The credential claim above survives this: the session still
-   holds no write-capable token. What does not survive is the
-   stronger reading, that the deterministic step is beyond the
-   agent's influence. Between them sits a filesystem.
-
-   Nothing reaches this on the **schedule**, which passes
-   `dry_run: true`. That is not the same as unreachable:
-   `issues-triage-cron.yaml` exposes `dry_run` as a dispatch
-   input, so one manual run with it unticked mints the write
-   token and opens the path. Which makes this a blocker on live
-   runs generally, not a note against a future rollout.
-
-   Two further routes reach the same place and close the same
-   way. The `copilot_token` secret may be a caller
-   `GITHUB_TOKEN` carrying `issues: write` (§13.3), and §13.2
-   records the session recovering it. And a process the session
-   started outlives the step that started it, since the runner
-   reaps orphans at job completion, so it can read a later
-   step's environment through `/proc` and take the write token
-   from there. Step boundaries are not a security boundary; job
-   boundaries are.
-
-   The fix is a second job: upload the snapshot as an artefact
-   before the agent runs, let the session finish, then apply
-   from a fresh checkout on a runner the session never touched.
-   Until that lands, a live run on this engine is not something
-   this design can justify.
-
-2. **Whether the applier should report rather than reject.** A
+1. **Whether the applier should report rather than reject.** A
    rejected proposal amounts to a line in the run's JSON. For a
    long-running schedule it may be worth surfacing repeated
    rejections, which would point at prompt drift rather than
    individual bad proposals.
-3. **The report observes labels alone.** Both snapshots carry
+2. **The report observes labels alone.** Both snapshots carry
    labels, so a retriage run that changes priority or type and
    nothing else reports "no label changes" and leaves those
    writes recorded nowhere but `apply-result.json`. Either feed
    that file into the report, or extend the snapshots to capture
    issue fields and type.
-4. **The apply step's own token mint has yet to run.** A fork
+3. **The apply step's own token mint has yet to run.** A fork
    dispatch exercised the agent, the proposal, validation and
    the apply step inside the workflow, but `testing.yaml` passes
    no App credentials, so the mint skipped and the step fell
@@ -1410,7 +1369,55 @@ reads rather than closing the hole.
    reaching the token request; the scan's own mint shares every
    other part of the mechanism and runs green daily.
 
+   Watch the priority write in particular. Review read the
+   endpoint as needing `issue_fields: write`, and this design
+   reads it as needing `issues: write`: the reference for `POST
+   /repos/{owner}/{repo}/issues/{n}/issue-field-values` lists
+   "Issues repository permissions (write)", and `issue_fields`
+   is the organisation permission covering `GET
+   /orgs/{org}/issue-fields`, which the applier reads and does
+   not write. Setting a value on an issue is an issue mutation;
+   defining the field is not.
+
+   Nobody has verified that reading, and the App holds
+   `issue_fields: read` (§5.1), so requesting write would exceed
+   the installation and fail the mint outright — a worse outcome
+   than the one it guards against. The failure mode if the
+   reading is wrong is loud rather than silent: `add_fields()`
+   raises, the proposal lands in `failed`, and the step exits
+   non-zero having applied labels but no priority. The remedy
+   then is to grant the App `issue_fields: write` **first**, and
+   make `permission-issue-fields` conditional on `dry_run` the
+   way `permission-issues` already is.
+
 #### Settled
+
+**Proposing and applying run in separate jobs.** The split began
+as one job running the agent first and the applier last, which
+ordered the two without separating them. Three routes crossed
+that gap. A session's shell runs unsandboxed as the same user
+(§13.2), so `--deny-tool=write` withholds the CLI's file-writing
+*tool* and says nothing about a redirect: an auto-approved `gh
+issue view N --jq .body > triage-assets/scripts/apply_triage.py`
+made issue text the applier. `artefacts/before.json` and the
+exclusion list sat in the same workspace, so the snapshot bound
+and the scope checks rested on it too. And a process the session
+started outlived the step that started it, because the runner
+reaps orphans when the job ends, leaving `/proc` on a later
+step's environment and the write token in it.
+
+Step boundaries order work. Job boundaries separate it. The
+applier now runs in a second job: the snapshot and exclusion
+list upload as an artefact **before** the session starts, where
+nothing it does afterwards can reach them; the scripts arrive
+from a fresh checkout of the same immutable ref rather than from
+a workspace a session held; and that runner mints the write
+token itself, after the first job and its processes have ended.
+Data crosses between them, never code and never a credential.
+
+The cost is a second runner, another checkout, and one more
+mint. Cheap beside the alternative, which was a claim about
+credentials standing in for a claim about code.
 
 **`Urgent` belongs to humans.** The applier refuses it and the
 prompt tells the agent to propose `High` with `escalate` set

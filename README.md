@@ -35,18 +35,32 @@ architecture, containment model, and rollout plan in full.
 ## How it works
 
 ```text
-snapshot (before) -> agent session -> snapshot (after)
-                                        -> diff -> report + summary
+  propose job                     |  apply job
+  --------------------------------|---------------------------
+  snapshot (before) --> [sealed] -----> check --> apply
+         |                        |        |            |
+         v                        |        |            v
+   agent session ---> proposal ------------+     snapshot (after)
+                                  |                     |
+                                  |          diff --> report + summary
 ```
 
+The bar is a job boundary, and it carries weight: the session
+runs where nothing can write, and the applier runs where the
+session cannot reach it. Data crosses it; code and credentials
+do not.
+
 1. Capture the organisation's open-issue state as JSON
-2. Skip the agent session when zero unlabelled issues exist
-3. Run the selected engine with read `gh` verbs and a policy
+2. Seal that snapshot as an artefact **before** the session
+   starts, so nothing the agent does can reach it
+3. Skip the agent session when zero unlabelled issues exist
+4. Run the selected engine with read `gh` verbs and a policy
    prompt ([`prompt/triage.md`](prompt/triage.md))
-4. Check the agent's proposal and apply what survives
-5. Capture the state again, diff, and report observed label
+5. In a second job, from a fresh checkout: check the agent's
+   proposal against the sealed snapshot and apply what survives
+6. Capture the state again, diff, and report observed label
    movement — never the agent's own claims — to the step summary
-6. Upload the artefact bundle (snapshots, transcript, prompt,
+7. Upload the artefact bundle (snapshots, transcript, prompt,
    report) with 90-day retention, even when the session fails
 
 ## Consuming the reusable workflow
@@ -200,13 +214,18 @@ leaving it unable to label.
 - **Dry-run by default**: consumers opt in to live labelling
 - **The agent never applies anything**: the tool policy grants it
   read verbs of `gh`, in every mode. It emits a structured
-  proposal, and a separate workflow step validates and applies
-  it. The repository credential the session holds is an
-  `issues: read` App token, so no session can label through its
-  own grant, whichever engine runs. On the Copilot engine that
-  policy is an approval prompt rather than a filter, and the CLI
+  proposal, and a **separate job** validates and applies it. The
+  repository credential the session holds is an `issues: read`
+  App token, so no session can label through its own grant,
+  whichever engine runs. On the Copilot engine that policy is an
+  approval prompt rather than a filter, and the CLI
   auto-approves further shell reads around it — which is why the
   credential, not the policy, carries the guarantee
+- **The applier runs where the agent cannot reach it**: on its
+  own runner, from a fresh checkout, against a write token
+  minted after the session's job has ended. A session's shell
+  runs unsandboxed as the same user, so a job it shares is a
+  workspace and a process table it shares
 - **The applier re-checks, rather than trusting**: it verifies
   organisation scope, the exclusion list and membership of the
   run's own snapshot, then reads each target live for its kind,
