@@ -9,7 +9,8 @@ output). This script diffs the two snapshots and emits:
 
 - a Markdown report (also appended to ``$GITHUB_STEP_SUMMARY`` when
   that variable is set), showing per-repository before/after counts
-  and a per-issue table of observed label changes
+  and a per-issue table of the labels the run added, with any
+  removals listed beneath it
 - a machine-readable JSON report with the same content
 
 The diff is the ground truth for what the run changed: the report
@@ -23,6 +24,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, cast
@@ -154,7 +156,7 @@ def repo_rows(
     return rows
 
 
-def _labels_cell(labels: frozenset[str]) -> str:
+def _labels_cell(labels: Iterable[str]) -> str:
     """Render a label set for a Markdown table cell."""
     return ", ".join(f"`{name}`" for name in sorted(labels)) or "*(none)*"
 
@@ -205,16 +207,26 @@ def render_markdown(
             " transcript and workflow logs."
         ]
     elif changes:
+        # The column reports the labels this run added, not the whole
+        # post-state: triage normally acts on unlabelled issues, so a
+        # "before" column would be empty on every row. Removals are
+        # rare but real -- migrating `enhancement` to `feature` drops
+        # a label -- so they follow the table instead of vanishing.
         lines += [
-            "| Issue | Labels before | Labels after |",
-            "| ----- | ------------- | ------------ |",
+            "| Issue | New labels |",
+            "| ----- | ---------- |",
         ]
         for change in changes:
             issue = change.issue
             link = f"[{issue.repo}#{issue.number}]({issue.url})"
+            lines += [f"| {link} | {_labels_cell(change.added)} |"]
+        removals = [change for change in changes if change.removed]
+        if removals:
+            lines += ["", "Labels removed:", ""]
             lines += [
-                f"| {link} | {_labels_cell(change.before)} "
-                f"| {_labels_cell(change.after)} |"
+                f"- [{change.issue.repo}#{change.issue.number}]"
+                f"({change.issue.url}): {_labels_cell(change.removed)}"
+                for change in removals
             ]
     else:
         lines += ["The snapshots show no label changes."]
