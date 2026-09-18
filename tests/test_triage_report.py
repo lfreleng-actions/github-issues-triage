@@ -77,6 +77,18 @@ class LabelChangeTableTests(unittest.TestCase):
         self.assertIn("[repo#1](https://example.invalid/repo/1) | `bug` |", markdown)
         self.assertNotIn("Labels removed", markdown)
 
+    def test_table_claims_observation_rather_than_authorship(self) -> None:
+        """A diff cannot attribute a change, and dry runs write nothing.
+
+        A human relabelling mid-run lands in the same diff, so the
+        report must not present these rows as this run's doing.
+        """
+        markdown = self.render(([], ["bug"]))
+        self.assertIn("Observed between the snapshots", markdown)
+        self.assertIn("a human editing during the run appears here too", markdown)
+        self.assertIn("`apply-result.json` records what this run applied", markdown)
+        self.assertNotIn("this run added", markdown)
+
     def test_retriage_row_excludes_labels_the_run_did_not_add(self) -> None:
         """A renamed column must not present pre-existing labels as new."""
         markdown = self.render((["bug"], ["bug", "CI"]))

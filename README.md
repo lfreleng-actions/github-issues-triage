@@ -245,12 +245,13 @@ prek run --all-files
 ```
 
 The offline suite covers policy, GitHub adapters, evidence,
-snapshots and workflow contracts; workflow tests use the PyYAML
-development dependency. The three-job Copilot dry-run and both
-secretless PR invocations passed; see
+snapshots, report rendering and workflow contracts; workflow tests
+use the PyYAML development dependency. The three-job Copilot
+dry-run, both secretless PR invocations and the first live run all
+passed; see
 [Design §11](docs/development/DESIGN.md#11-rollout-and-validation)
-for run evidence and limits. Live App token minting and real writes
-remain untested. Claude and Gemini are outside active validation.
+for run evidence and remaining gaps. Claude and Gemini are outside
+active validation.
 
 Build and preview the documentation site locally:
 

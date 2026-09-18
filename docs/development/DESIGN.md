@@ -5,10 +5,10 @@ SPDX-FileCopyrightText: 2026 The Linux Foundation
 
 # Design: Scheduled AI Triage of GitHub Issues
 
-**Status:** Three-job dry-run passed; live App minting and writes untested
+**Status:** Three-job pipeline live; first production write run passed
 **Repository:** `lfreleng-actions/github-issues-triage`
 **Author:** Matthew Watkins (AI-drafted, human-reviewed)
-**Last updated:** 2026-09-17
+**Last updated:** 2026-09-18
 
 This document describes the current workflow and helper scripts.
 §13.7 defines the prepare/propose/apply trust boundary.
@@ -310,12 +310,16 @@ exposes its model credential to the chosen code.
 
 ## 10. Open Questions
 
-- Test the live App mint and field/type permission handling
-  remotely, including the pinned token action's organisation grants.
+- Narrow the Apply job's write token to the repositories a validated
+  proposal targets. Scoping requires naming repositories, and an
+  org-wide scan names none, so the installation token reaches
+  every repository. The applier already rejects out-of-scope
+  targets, making this defence in depth rather than a new control;
+  it touches the credential path, so treat it as its own change.
 - Extend reporting if operators need observed priority/type changes;
   the current snapshot diff covers labels alone.
-- Check proposal quality, model spend and current egress endpoints
-  in a controlled Copilot run of the new layout.
+- Exercise partial-write recovery, rate-limit handling and a batch
+  near the 100-issue cap; the first live run covered none of these.
 
 ## 11. Rollout and Validation
 
@@ -347,11 +351,24 @@ a distinct attempt-2 report without repeating the model session.
 The [production dry-run][production-validation] also minted the
 App's read-scoped token and validated 19 proposals with no rejected,
 failed or dropped fields. Its snapshots were identical: it performed
-no issue writes. These results do not prove write-scoped token minting
-or real mutations. Inspect the first live run's outcomes and issue
-state; keep Claude and Gemini outside active validation.
+no issue writes.
+
+The [first live run][live-validation] then exercised the write path
+end to end. Its Apply job minted `issues: write` alongside the
+organisation `issue_fields` and `issue_types` reads, and applied all
+19 proposals with none rejected, failed, dropped or escalated. The
+snapshot diff recorded 19 changed issues, matching the
+applied set, and left no unlabelled issues. Direct API reads afterwards
+confirmed labels, `Type` and `Priority` on sampled issues. Apply took
+83 seconds for 19 issues across 12 repositories.
+
+That closes the untested path: live token minting, label
+writes, and issue-field and type writes. It does not exercise partial
+write recovery, rate-limit behaviour or a batch near the 100-issue
+cap. Keep Claude and Gemini outside active validation.
 
 [production-validation]: https://github.com/lfreleng-actions/github-issues-triage/actions/runs/35318520607
+[live-validation]: https://github.com/lfreleng-actions/github-issues-triage/actions/runs/35324225186
 
 Scheduled runs now apply triage changes. To pause production if a run
 reveals an operational problem, disable the scheduled caller:
@@ -411,6 +428,35 @@ Consider the model PAT, packet and Actions runtime credentials
 exposed to the untrusted runner. A wrong label is not a worst-case
 bound; model spend, data disclosure and artefact interference remain
 risks. §13.7 protects the apply path without relying on those rules.
+
+Run 35324225186 measured that boundary rather than assuming it. The
+session ran `sed` and `grep`, which the allow list did not name, and
+the CLI refused an unlisted `rm -f` of its own temporary file. So it
+auto-approves commands it classifies as reads and requires an explicit
+allow entry for the rest. The allow list now names the read utilities
+the session needs, which changes no current behaviour and keeps the
+run working if that classification tightens. The deny list still
+overrides auto-approval for `gh`, `git` and the write tool.
+
+That list holds `cat`, `jq`, `grep`, `head`, `tail` and `wc` alone.
+`awk` and `sed` stay out despite the session reaching for `sed`:
+`awk`'s `system()` runs arbitrary commands and GNU `sed`'s `w`
+command writes files, so allowing either would grant a standing
+bypass of those denials, because the shell tool sees the
+interpreter's name and nothing beyond it. The CLI may still
+auto-approve them as reads, which is this section's point: the gap
+is the classifier's, and the workflow declines to widen it. `jq` can
+read the environment, which is why `--secret-env-vars` covers the
+model token and why no installation token reaches this job at all.
+
+A later step clears the CLI's spilled tool output and its home
+directory, so the session has no reason to attempt the cleanup its
+policy refuses; a predictable refusal in the log is noise a real one
+has to compete with. That step deletes rather than scrubs. `srm` is
+absent from the runner image, `shred` documents its own dependence on
+in-place overwrite that SSD wear-levelling breaks, and the same issue
+bodies travel in the evidence artefact by design. Confidentiality of
+issue content is a retention question, not an erasure one.
 
 ### 13.3 Authentication and billing
 

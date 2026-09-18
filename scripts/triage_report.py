@@ -207,12 +207,22 @@ def render_markdown(
             " transcript and workflow logs."
         ]
     elif changes:
-        # The column reports the labels this run added, not the whole
-        # post-state: triage normally acts on unlabelled issues, so a
-        # "before" column would be empty on every row. Removals are
-        # rare but real -- migrating `enhancement` to `feature` drops
-        # a label -- so they follow the table instead of vanishing.
+        # The column reports what appeared since the before-snapshot,
+        # not the whole post-state: triage normally acts on unlabelled
+        # issues, so a "before" column would be empty on every row.
+        # Removals are rare but real -- migrating `enhancement` to
+        # `feature` drops a label -- so they follow the table instead
+        # of vanishing with the column.
+        #
+        # A diff observes movement; it does not attribute it. A human
+        # relabelling during the run shows up here too, and a dry run
+        # writes nothing yet can still produce rows. Cross-check
+        # apply-result.json before crediting a change to this run.
         lines += [
+            "Observed between the snapshots; a human editing during"
+            " the run appears here too. `apply-result.json` records"
+            " what this run applied.",
+            "",
             "| Issue | New labels |",
             "| ----- | ---------- |",
         ]
