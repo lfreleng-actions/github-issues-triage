@@ -109,11 +109,12 @@ gh workflow run testing.yaml -f engine=copilot
 
 The three-job Copilot dry-run passed; see
 [Design §11](../development/DESIGN.md#11-rollout-and-validation)
-for run evidence and limits. `testing.yaml` passes no App credentials,
-so live App token minting, its field/type permissions and real writes
-remain untested. A controlled organisation-App run must test those
-before enabling scheduled writes. Claude and Gemini are outside
-active validation.
+for run evidence and limits, including the production App dry-run.
+`testing.yaml` passes no App credentials and cannot verify writes.
+Scheduled runs now apply changes; inspect their token minting, field
+updates and outcomes, and disable the caller if problems arise.
+Manual dispatch retains its dry-run default. Claude and Gemini remain
+outside active validation.
 
 Inspect the preparation evidence, separate session artefact and
 final results. Check proposal/apply outcomes alongside the label

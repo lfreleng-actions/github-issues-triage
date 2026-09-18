@@ -119,6 +119,7 @@ jobs:
         uses: lfreleng-actions/harden-runner-block-action@805eedb0508c07714b61887a2b87a5c4bbeff22a # v0.12.1
         with:
           config: "${{ inputs.egress_allow_config }}"
+          allow_list_summary: 'true'
 
       - name: 'Harden runner'
         # yamllint disable-line rule:line-length
@@ -283,6 +284,7 @@ jobs:
         uses: lfreleng-actions/harden-runner-block-action@805eedb0508c07714b61887a2b87a5c4bbeff22a # v0.12.1
         with:
           config: "${{ inputs.egress_allow_config }}"
+          allow_list_summary: 'false'
 
       - name: 'Harden runner'
         # yamllint disable-line rule:line-length
@@ -484,6 +486,7 @@ jobs:
         uses: lfreleng-actions/harden-runner-block-action@805eedb0508c07714b61887a2b87a5c4bbeff22a # v0.12.1
         with:
           config: "${{ inputs.egress_allow_config }}"
+          allow_list_summary: 'false'
 
       - name: 'Harden runner'
         # yamllint disable-line rule:line-length
@@ -570,6 +573,15 @@ jobs:
         if: inputs.github_app_client_id != ''
         # yamllint disable-line rule:line-length
         uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        # v3.2.0 forwards INPUT_PERMISSION-* but does not declare
+        # these org grants. env avoids main/post input warnings.
+        # When upgrading, move these back to with if declared;
+        # action defaults could otherwise overwrite the env values.
+        env:
+          # yamllint disable-line rule:line-length
+          INPUT_PERMISSION-ISSUE-FIELDS: "${{ steps.proposal.outcome == 'success' && 'read' || '' }}"
+          # yamllint disable-line rule:line-length
+          INPUT_PERMISSION-ISSUE-TYPES: "${{ steps.proposal.outcome == 'success' && 'read' || '' }}"
         with:
           client-id: "${{ inputs.github_app_client_id }}"
           private-key: "${{ secrets.github_app_private_key }}"
@@ -579,12 +591,6 @@ jobs:
           # yamllint disable-line rule:line-length
           permission-issues: "${{ !inputs.dry_run && needs.propose.result == 'success' && steps.proposal.outcome == 'success' && 'write' || 'read' }}"
           permission-metadata: 'read'
-          # These org grants read definitions, not issue values.
-          # The pinned action forwards undeclared permission inputs.
-          # yamllint disable-line rule:line-length
-          permission-issue-fields: "${{ steps.proposal.outcome == 'success' && 'read' || '' }}"
-          # yamllint disable-line rule:line-length
-          permission-issue-types: "${{ steps.proposal.outcome == 'success' && 'read' || '' }}"
 
       - name: 'Apply triage proposal'
         id: apply

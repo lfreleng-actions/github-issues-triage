@@ -16,6 +16,9 @@ and type, then validates and applies those proposals on a separate
 runner. Before/after snapshots record observed label changes;
 session logs remain separate from the trusted report.
 
+The weekday schedule runs **live**, applying validated labels, Priority
+and Type. Manual dispatch and reusable-workflow defaults remain dry-run.
+
 **Copilot is the active validation target.** Claude and Gemini
 remain selectable but unverified in the three-job layout.
 
@@ -194,8 +197,9 @@ Propose never receives it.
 
 ## Safety model
 
-- **Dry-run by default:** the applier validates without writing.
-  Its App token has issue-read access during dry-run or reporting
+- **Dry-run for manual and reusable defaults:** callers can check proposals
+  without writing; the weekday schedule opts into live mode.
+  The App token has issue-read access during dry-run or reporting
   without application; issue-write access requires live mode and
   proposal success.
 - **App credentials stay in trusted jobs:** neither an App-token

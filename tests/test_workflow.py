@@ -322,13 +322,59 @@ class WorkflowContractTests(WorkflowCase):
         self.assert_before("apply", "proposal", "apply")
 
     def test_apply_org_grants_require_a_validated_proposal(self) -> None:
-        """Reporting-only runs need no organisation issue-field or issue-type grants."""
-        permissions = self.step("apply", "app-token")["with"]
+        """Forward missing manifest inputs without warnings or broader grants."""
+        token = self.step("apply", "app-token")
+        self.assertEqual(token["with"]["permission-metadata"], "read")
         for grant in ("permission-issue-fields", "permission-issue-types"):
             with self.subTest(grant=grant):
+                self.assertNotIn(grant, token["with"])
+                environment_key = "INPUT_" + grant.upper()
                 self.assert_expression(
-                    permissions[grant],
+                    token.get("env", {}).get(environment_key, ""),
                     "steps.proposal.outcome == 'success' && 'read' || ''",
+                )
+
+    def test_schedule_is_live_without_changing_manual_dry_run_defaults(self) -> None:
+        """Schedules write; explicit manual and reusable dry runs stay available."""
+        cron: dict[str, Any] = yaml.load(
+            (WORKFLOW.parent / "issues-triage-cron.yaml").read_text(encoding="utf-8"),
+            Loader=yaml.BaseLoader,
+        )
+        self.assertEqual(cron["on"]["schedule"], [{"cron": "0 7 * * 1-5"}])
+        self.assertEqual(
+            cron["on"]["workflow_dispatch"]["inputs"]["dry_run"]["default"], "true"
+        )
+        self.assert_expression(
+            cron["jobs"]["triage"]["with"]["dry_run"],
+            "github.event_name == 'workflow_dispatch' && inputs.dry_run",
+        )
+        reusable: dict[str, Any] = yaml.load(
+            WORKFLOW.read_text(encoding="utf-8"), Loader=yaml.BaseLoader
+        )
+        self.assertEqual(
+            reusable["on"]["workflow_call"]["inputs"]["dry_run"]["default"], "true"
+        )
+
+    def test_allow_list_summary_is_emitted_in_prepare_alone(self) -> None:
+        """Keep hardening in every job without duplicating its summary block."""
+        for job, expected in (
+            ("prepare", "true"),
+            ("propose", "false"),
+            ("apply", "false"),
+        ):
+            with self.subTest(job=job):
+                loaders = self.actions(
+                    job, "lfreleng-actions/harden-runner-block-action"
+                )
+                self.assertEqual(len(loaders), 1)
+                self.assertEqual(
+                    loaders[0]["with"].get("allow_list_summary", "true"), expected
+                )
+                self.assertEqual(
+                    loaders[0]["with"]["config"], "${{ inputs.egress_allow_config }}"
+                )
+                self.assertEqual(
+                    len(self.actions(job, "step-security/harden-runner")), 1
                 )
 
     def test_apply_can_report_when_propose_is_skipped_or_fails(self) -> None:

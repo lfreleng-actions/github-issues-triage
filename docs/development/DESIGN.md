@@ -31,9 +31,10 @@ open issues, asks an agent to propose category labels, priority and
 type, and delegates validation and writes to trusted code. Snapshots
 and a diff report show observed label movement.
 
-The schedule uses Copilot and stays in dry-run during rollout. The
-reusable workflow defaults to `engine: claude`, so consumers targeting
-current validation should select `copilot` explicitly.
+The schedule uses Copilot in live mode, applying validated labels,
+Priority and Type. Manual dispatch and reusable-workflow consumers
+keep their dry-run defaults. The reusable workflow defaults to
+`engine: claude`, so consumers should select `copilot` explicitly.
 
 ### Non-goals
 
@@ -196,6 +197,11 @@ packet removes GitHub issue reads from the session's duties; it
 does not disconnect the runner from the model or artefact services.
 Collect current endpoints before enabling block mode.
 
+The loader's pre hook runs in all three jobs, including audit mode.
+`allow_list_summary` is true in Prepare and false in Propose and Apply,
+making the shared allow-list summary appear once. This changes reporting,
+not allow-list loading or the hardening applied to each runner.
+
 ### 7.2 Reporting and Run Artefacts
 
 `snapshot.sh` captures repository, number, title, URL, labels and
@@ -338,14 +344,35 @@ a distinct attempt-2 report without repeating the model session.
 [fork-validation]: https://github.com/modeseven-lfreleng-actions/github-issues-triage/actions/runs/35216029661
 [pr-validation]: https://github.com/lfreleng-actions/github-issues-triage/actions/runs/35216002363
 
-**Live App token minting and real writes remain untested.** Neither
-these App-less runs nor offline simulations prove live App permission
-handling or writes. Test the organisation App path under controlled
-scope, including field/type permissions, and inspect actual issue
-state and apply outcomes before enabling scheduled writes. This
-evidence does not establish production readiness. Keep Claude and
-Gemini outside active validation until a separate effort verifies
-those paths.
+The [production dry-run][production-validation] also minted the
+App's read-scoped token and validated 19 proposals with no rejected,
+failed or dropped fields. Its snapshots were identical: it performed
+no issue writes. These results do not prove write-scoped token minting
+or real mutations. Inspect the first live run's outcomes and issue
+state; keep Claude and Gemini outside active validation.
+
+[production-validation]: https://github.com/lfreleng-actions/github-issues-triage/actions/runs/35318520607
+
+Scheduled runs now apply triage changes. To pause production if a run
+reveals an operational problem, disable the scheduled caller:
+
+```bash
+gh workflow disable issues-triage-cron.yaml \
+  --repo lfreleng-actions/github-issues-triage
+```
+
+Disabling future runs does not cancel an in-progress run or undo its
+writes. Cancel an active run separately when needed, then inspect
+partial application before retrying. Resolve the problem before
+re-enabling the caller. Manual dispatch still defaults to dry-run.
+
+The pinned token action forwards the organisation read grants through
+`INPUT_PERMISSION-ISSUE-FIELDS` and `INPUT_PERMISSION-ISSUE-TYPES` in
+its step environment. Version 3.2.0 does not declare corresponding
+inputs; putting them in `with` creates main and post warnings. Keep
+explicit repository permissions and proposal-success conditions.
+Recheck this workaround on upgrades: declared input defaults
+can overwrite the environment values.
 
 ## 12. Google Gemini
 
@@ -419,7 +446,7 @@ writes remain pending (§10–§11).
 
 ### 13.6 Scheduled identity
 
-The schedule selects Copilot and remains dry-run. A dedicated App
+The schedule selects Copilot and applies changes. A dedicated App
 handles trusted repository reads and writes; a separate personal PAT
 handles model requests. Do not combine these roles by passing an App
 key or repository-capable PAT to Propose. Rotate the model PAT before
