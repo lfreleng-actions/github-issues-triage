@@ -6,12 +6,10 @@
 # this repository: 07:00 UTC every weekday, scanning the whole
 # organisation this repository belongs to.
 #
-# Scheduled runs stay in dry-run until the rollout completes (see
-# docs/development/DESIGN.md section 11); a manual dispatch can go
-# live by unticking dry_run. Egress runs in audit mode until the
-# agent session's endpoints land in the org allow-list, then flips
-# to block with the tagged allow-list loaded by
-# harden-runner-block-action.
+# Scheduled runs apply triage changes. Manual dispatch defaults to
+# dry-run and respects the operator's choice. Disable this workflow
+# to pause the schedule if an operational problem needs attention
+# (docs/development/DESIGN.md section 11). Egress stays in audit mode.
 #
 # Scheduled runs take the copilot engine: the organisation already
 # pays for Copilot, so triage spend draws on an existing
@@ -78,10 +76,10 @@ jobs:
       # events, which carry no inputs, and API dispatches that
       # omit this one.
       engine: ${{ inputs.engine || 'copilot' }}
-      # Keep the schedule dry until the three-job path and live
-      # App writes have been validated. Dispatch respects the input.
+      # The schedule is live; manual dispatch retains its dry-run
+      # default and can opt into writes by clearing that input.
       dry_run: >-
-        ${{ github.event_name == 'schedule' || inputs.dry_run }}
+        ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run }}
       retriage: ${{ inputs.retriage || false }}
       repository: ${{ inputs.repository || '' }}
       egress_policy: 'audit'

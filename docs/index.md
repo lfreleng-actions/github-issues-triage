@@ -93,7 +93,7 @@ live checks do not prevent races with human edits. Inspect partial
 writes before targeted recovery; never overwrite human Priority to
 force replay. Tool approval rules and redaction are not a sandbox.
 
-The three-job Copilot dry-run and both secretless PR invocations
-passed; see [Design §11](development/DESIGN.md#11-rollout-and-validation)
-for run evidence and limits. Live App token minting and real writes
-remain untested.
+The three-job Copilot dry-run and the first live run both passed;
+see
+[Design §11](development/DESIGN.md#11-rollout-and-validation)
+for run evidence and remaining gaps.

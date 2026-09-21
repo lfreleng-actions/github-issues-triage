@@ -322,13 +322,154 @@ class WorkflowContractTests(WorkflowCase):
         self.assert_before("apply", "proposal", "apply")
 
     def test_apply_org_grants_require_a_validated_proposal(self) -> None:
-        """Reporting-only runs need no organisation issue-field or issue-type grants."""
-        permissions = self.step("apply", "app-token")["with"]
+        """Forward missing manifest inputs without warnings or broader grants."""
+        token = self.step("apply", "app-token")
+        self.assertEqual(token["with"]["permission-metadata"], "read")
         for grant in ("permission-issue-fields", "permission-issue-types"):
             with self.subTest(grant=grant):
+                self.assertNotIn(grant, token["with"])
+                environment_key = "INPUT_" + grant.upper()
                 self.assert_expression(
-                    permissions[grant],
+                    token.get("env", {}).get(environment_key, ""),
                     "steps.proposal.outcome == 'success' && 'read' || ''",
+                )
+
+    def test_schedule_is_live_without_changing_manual_dry_run_defaults(self) -> None:
+        """Schedules write; explicit manual and reusable dry runs stay available."""
+        cron: dict[str, Any] = yaml.load(
+            (WORKFLOW.parent / "issues-triage-cron.yaml").read_text(encoding="utf-8"),
+            Loader=yaml.BaseLoader,
+        )
+        self.assertEqual(cron["on"]["schedule"], [{"cron": "0 7 * * 1-5"}])
+        self.assertEqual(
+            cron["on"]["workflow_dispatch"]["inputs"]["dry_run"]["default"], "true"
+        )
+        self.assert_expression(
+            cron["jobs"]["triage"]["with"]["dry_run"],
+            "github.event_name == 'workflow_dispatch' && inputs.dry_run",
+        )
+        reusable: dict[str, Any] = yaml.load(
+            WORKFLOW.read_text(encoding="utf-8"), Loader=yaml.BaseLoader
+        )
+        self.assertEqual(
+            reusable["on"]["workflow_call"]["inputs"]["dry_run"]["default"], "true"
+        )
+
+    def test_copilot_policy_declares_reads_and_still_denies_writes(self) -> None:
+        """Declaring auto-approved reads must not relax the enforced denials."""
+        script: str = self.step("propose", "Run triage agent (Copilot)")["run"]
+        self.assertIn("for cmd in cat jq grep head tail wc; do", script)
+        self.assertIn('allow="$allow,shell($cmd),shell($cmd:*)"', script)
+        self.assertIn('--allow-tool="${allow#,}"', script)
+        # The deny list is what actually overrides auto-approval,
+        # so widening reads must leave these entries untouched.
+        self.assertIn(
+            "--deny-tool='write,shell(gh),shell(gh:*),shell(git),shell(git:*)'",
+            script,
+        )
+        self.assertIn("--available-tools=bash,list_bash,read_bash,stop_bash", script)
+
+    def test_allow_list_blesses_no_command_capable_interpreter(self) -> None:
+        """An allowed interpreter would bypass the write, gh and git denials.
+
+        The shell tool matches the command it launches, so `awk` running
+        `system("gh ...")` never presents as `gh`. awk executes outright
+        and GNU sed's `w` command writes files, so neither belongs in a
+        list whose stated purpose is read-only access.
+        """
+        script: str = self.step("propose", "Run triage agent (Copilot)")["run"]
+        declared = re.search(r"for cmd in ([^;]+); do", script)
+        self.assertIsNotNone(declared)
+        assert declared is not None
+        allowed = set(declared[1].split())
+        capable = {
+            "awk",
+            "sed",
+            "sh",
+            "bash",
+            "python",
+            "python3",
+            "perl",
+            "node",
+            "env",
+            "xargs",
+            "find",
+            "tee",
+            "dd",
+            "install",
+            "rm",
+            "cp",
+            "mv",
+        }
+        self.assertEqual(allowed & capable, set())
+        self.assertEqual(allowed, {"cat", "jq", "grep", "head", "tail", "wc"})
+
+    def test_prompt_forbids_file_changes_and_guides_projection(self) -> None:
+        """The session wasted turns paging bodies and tried to delete a file."""
+        raw = (WORKFLOW.parents[2] / "prompt" / "triage.md").read_text(encoding="utf-8")
+        # Collapse wrapping so a reflowed paragraph cannot break an
+        # assertion about wording the session actually receives.
+        prompt = re.sub(r"\s+", " ", raw)
+        self.assertIn("Do not change, create or delete files", prompt)
+        self.assertIn("Prefer a `jq` projection", prompt)
+        self.assertIn("the workflow clears the session's scratch files", prompt)
+        for utility in ("grep", "head", "tail"):
+            with self.subTest(utility=utility):
+                self.assertIn(f"`{utility}`", prompt)
+        # Recommending an interpreter the policy will not bless
+        # would invite the session to rely on auto-approval.
+        for interpreter in ("`awk`", "`sed`"):
+            with self.subTest(interpreter=interpreter):
+                self.assertNotIn(interpreter, prompt)
+
+    def test_scratch_cleanup_runs_on_the_agent_runner_after_the_session(self) -> None:
+        """A later job cannot reach this scratch, and failures must still clear it."""
+        cleanup = self.step("propose", "Clear session scratch files")
+        self.assert_expression(cleanup["if"], "always() && inputs.engine == 'copilot'")
+        self.assertEqual(cleanup["env"], {"COPILOT_HOME": "${{ runner.temp }}/copilot"})
+        self.assert_before("propose", "agent-copilot", "Clear session scratch files")
+        # Clearing must not reach the proposal the next job consumes.
+        self.assertNotIn("artefacts", cleanup["run"].replace("artefacts/ is", ""))
+
+    def test_cleanup_failure_cannot_suppress_writes(self) -> None:
+        """This job's result gates the apply path, so hygiene must not fail it.
+
+        Without continue-on-error a failed delete fails Propose, and
+        every write-gated apply step reads needs.propose.result, so the
+        run would report cleanly having applied nothing.
+        """
+        cleanup = self.step("propose", "Clear session scratch files")
+        self.assertIs(cleanup["continue-on-error"], True)
+        gated = [
+            step
+            for step in self.jobs["apply"]["steps"]
+            if "needs.propose.result" in str(step.get("if", ""))
+        ]
+        self.assertNotEqual(gated, [])
+        for step in gated:
+            with self.subTest(step=step.get("name")):
+                self.assertIn("needs.propose.result == 'success'", step["if"])
+
+    def test_allow_list_summary_is_emitted_in_prepare_alone(self) -> None:
+        """Keep hardening in every job without duplicating its summary block."""
+        for job, expected in (
+            ("prepare", "true"),
+            ("propose", "false"),
+            ("apply", "false"),
+        ):
+            with self.subTest(job=job):
+                loaders = self.actions(
+                    job, "lfreleng-actions/harden-runner-block-action"
+                )
+                self.assertEqual(len(loaders), 1)
+                self.assertEqual(
+                    loaders[0]["with"].get("allow_list_summary", "true"), expected
+                )
+                self.assertEqual(
+                    loaders[0]["with"]["config"], "${{ inputs.egress_allow_config }}"
+                )
+                self.assertEqual(
+                    len(self.actions(job, "step-security/harden-runner")), 1
                 )
 
     def test_apply_can_report_when_propose_is_skipped_or_fails(self) -> None:
@@ -389,6 +530,65 @@ class SelfRepositoryCallTests(unittest.TestCase):
 class WorkflowScriptTests(WorkflowCase):
     """Execute deterministic workflow shell steps without GitHub or credentials."""
 
+    def test_cleanup_clears_spilled_output_without_following_symlinks(self) -> None:
+        """Run the real script: it must clear scratch and reach nothing else."""
+        scratch = self.root / "scratch"
+        scratch.mkdir()
+        home = self.root / "copilot-home"
+        (home / "session").mkdir(parents=True)
+        (home / "session" / "state.json").write_text("{}", encoding="utf-8")
+        spilled = scratch / "1789719962183-copilot-tool-output-3626-abc.txt"
+        spilled.write_text("issue bodies", encoding="utf-8")
+        unrelated = scratch / "runner-owned.txt"
+        unrelated.write_text("keep", encoding="utf-8")
+        nested = scratch / "nested"
+        nested.mkdir()
+        deeper = nested / "9-copilot-tool-output-1-deep.txt"
+        deeper.write_text("out of depth", encoding="utf-8")
+        # A planted symlink matching the pattern must not redirect the
+        # delete onto the file it points at.
+        outside = self.root / "outside-target.txt"
+        outside.write_text("must survive", encoding="utf-8")
+        (scratch / "0-copilot-tool-output-link.txt").symlink_to(outside)
+        artefacts = self.root / "artefacts"
+        artefacts.mkdir()
+        summary = artefacts / "session-summary.md"
+        summary.write_text("proposal", encoding="utf-8")
+
+        result = self.run_step(
+            "propose",
+            "Clear session scratch files",
+            TMPDIR=str(scratch),
+            COPILOT_HOME=str(home),
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("Cleared 1 spilled tool-output file(s)", result.stdout)
+        self.assertFalse(spilled.exists())
+        self.assertFalse(home.exists())
+        self.assertTrue(unrelated.exists())
+        self.assertTrue(deeper.exists())
+        self.assertTrue(outside.exists())
+        self.assertEqual(summary.read_text(encoding="utf-8"), "proposal")
+
+    def test_cleanup_failure_surfaces_without_pipefail(self) -> None:
+        """Actions runs an undeclared shell without pipefail.
+
+        A piped find would hand its exit status to wc, so the step
+        would report a clean cleanup and continue-on-error would have
+        nothing to expose. Run it exactly as the runner would.
+        """
+        step = self.step("propose", "Clear session scratch files")
+        self.assertNotIn("shell", step)
+        result = self.run_step(
+            "propose",
+            "Clear session scratch files",
+            TMPDIR=str(self.root / "absent-scratch"),
+            COPILOT_HOME=str(self.root / "absent-home"),
+        )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertNotIn("Cleared", result.stdout)
+
     bash: str
 
     @classmethod
@@ -438,13 +638,20 @@ class WorkflowScriptTests(WorkflowCase):
     def run_step(
         self, job: str, identity: str, **environment: str
     ) -> subprocess.CompletedProcess[str]:
-        """Run the actual YAML body with Actions' fail-fast Bash semantics."""
-        script: str = self.step(job, identity)["run"]
+        """Run the actual YAML body under the shell Actions would use.
+
+        An undeclared shell runs as ``bash -e {0}``; ``shell: bash``
+        adds ``pipefail``. Modelling the wrong one hides exactly the
+        failures that survive into production, so honour the step.
+        """
+        step = self.step(job, identity)
+        script: str = step["run"]
         self.assertNotIn(
             "${{", script, "inline scripts must receive expressions via env"
         )
+        flags = ["-eo", "pipefail"] if step.get("shell") == "bash" else ["-e"]
         return subprocess.run(
-            [self.bash, "--noprofile", "--norc", "-eo", "pipefail", "-c", script],
+            [self.bash, "--noprofile", "--norc", *flags, "-c", script],
             cwd=self.root,
             env={**self.environment, **environment},
             capture_output=True,

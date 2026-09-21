@@ -5,10 +5,10 @@ SPDX-FileCopyrightText: 2026 The Linux Foundation
 
 # Design: Scheduled AI Triage of GitHub Issues
 
-**Status:** Three-job dry-run passed; live App minting and writes untested
+**Status:** Three-job pipeline live; first production write run passed
 **Repository:** `lfreleng-actions/github-issues-triage`
 **Author:** Matthew Watkins (AI-drafted, human-reviewed)
-**Last updated:** 2026-09-17
+**Last updated:** 2026-09-18
 
 This document describes the current workflow and helper scripts.
 §13.7 defines the prepare/propose/apply trust boundary.
@@ -31,9 +31,10 @@ open issues, asks an agent to propose category labels, priority and
 type, and delegates validation and writes to trusted code. Snapshots
 and a diff report show observed label movement.
 
-The schedule uses Copilot and stays in dry-run during rollout. The
-reusable workflow defaults to `engine: claude`, so consumers targeting
-current validation should select `copilot` explicitly.
+The schedule uses Copilot in live mode, applying validated labels,
+Priority and Type. Manual dispatch and reusable-workflow consumers
+keep their dry-run defaults. The reusable workflow defaults to
+`engine: claude`, so consumers should select `copilot` explicitly.
 
 ### Non-goals
 
@@ -196,6 +197,11 @@ packet removes GitHub issue reads from the session's duties; it
 does not disconnect the runner from the model or artefact services.
 Collect current endpoints before enabling block mode.
 
+The loader's pre hook runs in all three jobs, including audit mode.
+`allow_list_summary` is true in Prepare and false in Propose and Apply,
+making the shared allow-list summary appear once. This changes reporting,
+not allow-list loading or the hardening applied to each runner.
+
 ### 7.2 Reporting and Run Artefacts
 
 `snapshot.sh` captures repository, number, title, URL, labels and
@@ -304,12 +310,16 @@ exposes its model credential to the chosen code.
 
 ## 10. Open Questions
 
-- Test the live App mint and field/type permission handling
-  remotely, including the pinned token action's organisation grants.
+- Narrow the Apply job's write token to the repositories a validated
+  proposal targets. Scoping requires naming repositories, and an
+  org-wide scan names none, so the installation token reaches
+  every repository. The applier already rejects out-of-scope
+  targets, making this defence in depth rather than a new control;
+  it touches the credential path, so treat it as its own change.
 - Extend reporting if operators need observed priority/type changes;
   the current snapshot diff covers labels alone.
-- Check proposal quality, model spend and current egress endpoints
-  in a controlled Copilot run of the new layout.
+- Exercise partial-write recovery, rate-limit handling and a batch
+  near the 100-issue cap; the first live run covered none of these.
 
 ## 11. Rollout and Validation
 
@@ -338,14 +348,48 @@ a distinct attempt-2 report without repeating the model session.
 [fork-validation]: https://github.com/modeseven-lfreleng-actions/github-issues-triage/actions/runs/35216029661
 [pr-validation]: https://github.com/lfreleng-actions/github-issues-triage/actions/runs/35216002363
 
-**Live App token minting and real writes remain untested.** Neither
-these App-less runs nor offline simulations prove live App permission
-handling or writes. Test the organisation App path under controlled
-scope, including field/type permissions, and inspect actual issue
-state and apply outcomes before enabling scheduled writes. This
-evidence does not establish production readiness. Keep Claude and
-Gemini outside active validation until a separate effort verifies
-those paths.
+The [production dry-run][production-validation] also minted the
+App's read-scoped token and validated 19 proposals with no rejected,
+failed or dropped fields. Its snapshots were identical: it performed
+no issue writes.
+
+The [first live run][live-validation] then exercised the write path
+end to end. Its Apply job minted `issues: write` alongside the
+organisation `issue_fields` and `issue_types` reads, and applied all
+19 proposals with none rejected, failed, dropped or escalated. The
+snapshot diff recorded 19 changed issues, matching the
+applied set, and left no unlabelled issues. Direct API reads afterwards
+confirmed labels, `Type` and `Priority` on sampled issues. Apply took
+83 seconds for 19 issues across 12 repositories.
+
+That closes the untested path: live token minting, label
+writes, and issue-field and type writes. It does not exercise partial
+write recovery, rate-limit behaviour or a batch near the 100-issue
+cap. Keep Claude and Gemini outside active validation.
+
+[production-validation]: https://github.com/lfreleng-actions/github-issues-triage/actions/runs/35318520607
+[live-validation]: https://github.com/lfreleng-actions/github-issues-triage/actions/runs/35324225186
+
+Scheduled runs now apply triage changes. To pause production if a run
+reveals an operational problem, disable the scheduled caller:
+
+```bash
+gh workflow disable issues-triage-cron.yaml \
+  --repo lfreleng-actions/github-issues-triage
+```
+
+Disabling future runs does not cancel an in-progress run or undo its
+writes. Cancel an active run separately when needed, then inspect
+partial application before retrying. Resolve the problem before
+re-enabling the caller. Manual dispatch still defaults to dry-run.
+
+The pinned token action forwards the organisation read grants through
+`INPUT_PERMISSION-ISSUE-FIELDS` and `INPUT_PERMISSION-ISSUE-TYPES` in
+its step environment. Version 3.2.0 does not declare corresponding
+inputs; putting them in `with` creates main and post warnings. Keep
+explicit repository permissions and proposal-success conditions.
+Recheck this workaround on upgrades: declared input defaults
+can overwrite the environment values.
 
 ## 12. Google Gemini
 
@@ -385,6 +429,35 @@ exposed to the untrusted runner. A wrong label is not a worst-case
 bound; model spend, data disclosure and artefact interference remain
 risks. §13.7 protects the apply path without relying on those rules.
 
+Run 35324225186 measured that boundary rather than assuming it. The
+session ran `sed` and `grep`, which the allow list did not name, and
+the CLI refused an unlisted `rm -f` of its own temporary file. So it
+auto-approves commands it classifies as reads and requires an explicit
+allow entry for the rest. The allow list now names the read utilities
+the session needs, which changes no current behaviour and keeps the
+run working if that classification tightens. The deny list still
+overrides auto-approval for `gh`, `git` and the write tool.
+
+That list holds `cat`, `jq`, `grep`, `head`, `tail` and `wc` alone.
+`awk` and `sed` stay out despite the session reaching for `sed`:
+`awk`'s `system()` runs arbitrary commands and GNU `sed`'s `w`
+command writes files, so allowing either would grant a standing
+bypass of those denials, because the shell tool sees the
+interpreter's name and nothing beyond it. The CLI may still
+auto-approve them as reads, which is this section's point: the gap
+is the classifier's, and the workflow declines to widen it. `jq` can
+read the environment, which is why `--secret-env-vars` covers the
+model token and why no installation token reaches this job at all.
+
+A later step clears the CLI's spilled tool output and its home
+directory, so the session has no reason to attempt the cleanup its
+policy refuses; a predictable refusal in the log is noise a real one
+has to compete with. That step deletes rather than scrubs. `srm` is
+absent from the runner image, `shred` documents its own dependence on
+in-place overwrite that SSD wear-levelling breaks, and the same issue
+bodies travel in the evidence artefact by design. Confidentiality of
+issue content is a retention question, not an erasure one.
+
 ### 13.3 Authentication and billing
 
 `copilot_token` must be a personal fine-grained PAT with Copilot
@@ -419,7 +492,7 @@ writes remain pending (§10–§11).
 
 ### 13.6 Scheduled identity
 
-The schedule selects Copilot and remains dry-run. A dedicated App
+The schedule selects Copilot and applies changes. A dedicated App
 handles trusted repository reads and writes; a separate personal PAT
 handles model requests. Do not combine these roles by passing an App
 key or repository-capable PAT to Propose. Rotate the model PAT before

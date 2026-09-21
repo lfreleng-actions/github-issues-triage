@@ -119,6 +119,7 @@ jobs:
         uses: lfreleng-actions/harden-runner-block-action@805eedb0508c07714b61887a2b87a5c4bbeff22a # v0.12.1
         with:
           config: "${{ inputs.egress_allow_config }}"
+          allow_list_summary: 'true'
 
       - name: 'Harden runner'
         # yamllint disable-line rule:line-length
@@ -283,6 +284,7 @@ jobs:
         uses: lfreleng-actions/harden-runner-block-action@805eedb0508c07714b61887a2b87a5c4bbeff22a # v0.12.1
         with:
           config: "${{ inputs.egress_allow_config }}"
+          allow_list_summary: 'false'
 
       - name: 'Harden runner'
         # yamllint disable-line rule:line-length
@@ -401,17 +403,88 @@ jobs:
           esac
           mkdir -p artefacts/copilot-logs
           prompt="$(cat artefacts/prompt.md)"
+          # Read-only utilities the session needs to page a large
+          # packet. The CLI auto-approves what it classifies as a
+          # read, so this list changes nothing today: run
+          # 35324225186 shows sed and grep running unlisted while
+          # an unlisted rm was refused. Declaring them states the
+          # intended toolset and keeps the run working if that
+          # classification tightens. Enforcement stays with the
+          # deny list, the credential split and the applier.
+          #
+          # awk and sed are deliberately absent despite the session
+          # reaching for sed. Neither is read-only: awk's system()
+          # runs arbitrary commands, and GNU sed's w command writes
+          # files. Blessing either would grant a standing bypass of
+          # the write, gh and git denials below, because the shell
+          # tool only ever sees the interpreter's own name. The CLI
+          # may still auto-approve them as reads -- that gap is
+          # DESIGN.md 13.2 -- but this workflow will not widen it.
+          allow=''
+          for cmd in cat jq grep head tail wc; do
+            allow="$allow,shell($cmd),shell($cmd:*)"
+          done
           copilot \
             --prompt="$prompt" \
             --model="$MODEL" \
             --available-tools=bash,list_bash,read_bash,stop_bash \
-            --allow-tool='shell(cat),shell(cat:*),shell(jq),shell(jq:*)' \
+            --allow-tool="${allow#,}" \
             --deny-tool='write,shell(gh),shell(gh:*),shell(git),shell(git:*)' \
             --secret-env-vars=COPILOT_GITHUB_TOKEN \
             --no-ask-user --no-custom-instructions --disable-builtin-mcps \
             --no-auto-update --no-color \
             --log-dir=artefacts/copilot-logs \
             --share=artefacts/session-summary.md
+
+      # The CLI spills large tool output to the system temp directory
+      # and keeps session state in COPILOT_HOME. Neither leaves this
+      # runner: the VM is single-use and the upload below names paths
+      # under artefacts/ alone. Clearing them removes the session's
+      # reason to attempt its own cleanup, which the tool policy
+      # refuses -- a predictable refusal in the log is noise that a
+      # real one has to compete with.
+      #
+      # This is hygiene, not secure erasure, and deliberately so.
+      # srm is absent from the runner image, and coreutils shred
+      # documents its own crucial assumption -- that the filesystem
+      # and hardware overwrite in place -- which SSD wear-levelling
+      # breaks. The same issue bodies also travel in the evidence
+      # artefact by design, so scrubbing this copy would buy nothing.
+      #
+      # A later job cannot do this: the scratch lives on this runner.
+      #
+      # continue-on-error because hygiene must never gate a write.
+      # This job's result gates the apply path, so a failure here
+      # would leave Apply reporting while silently applying nothing
+      # -- a far worse outcome than an uncleaned temporary file on a
+      # VM about to be destroyed. The step's own outcome still
+      # records the failure for anyone reading the run.
+      - name: 'Clear session scratch files'
+        if: always() && inputs.engine == 'copilot'
+        continue-on-error: true
+        env:
+          COPILOT_HOME: "${{ runner.temp }}/copilot"
+        run: |
+          # Node resolves the temp directory through TMPDIR, so honour
+          # it rather than assuming /tmp. Bounded to regular files the
+          # CLI names itself: -maxdepth 1 and -type f stop a planted
+          # symlink or directory redirecting the delete elsewhere.
+          #
+          # The find runs in its own command substitution rather than
+          # heading a pipeline. Actions runs an undeclared shell as
+          # 'bash -e {0}' with no pipefail, so a piped find that
+          # failed would hand its status to wc and report a clean
+          # cleanup -- leaving continue-on-error nothing to catch.
+          scratch="${TMPDIR:-/tmp}"
+          found=$(find "$scratch" -maxdepth 1 -type f \
+            -name '*-copilot-tool-output-*' -print -delete)
+          removed=0
+          if [ -n "$found" ]; then
+            removed=$(printf '%s\n' "$found" | wc -l | tr -d '[:space:]')
+          fi
+          rm -rf "$COPILOT_HOME"
+          echo "Cleared $removed spilled tool-output file(s) and the" \
+            "CLI home; artefacts/ is untouched."
 
       - name: 'Preserve legacy session output'
         if: always() && inputs.engine != 'copilot'
@@ -484,6 +557,7 @@ jobs:
         uses: lfreleng-actions/harden-runner-block-action@805eedb0508c07714b61887a2b87a5c4bbeff22a # v0.12.1
         with:
           config: "${{ inputs.egress_allow_config }}"
+          allow_list_summary: 'false'
 
       - name: 'Harden runner'
         # yamllint disable-line rule:line-length
@@ -570,6 +644,15 @@ jobs:
         if: inputs.github_app_client_id != ''
         # yamllint disable-line rule:line-length
         uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        # v3.2.0 forwards INPUT_PERMISSION-* but does not declare
+        # these org grants. env avoids main/post input warnings.
+        # When upgrading, move these back to with if declared;
+        # action defaults could otherwise overwrite the env values.
+        env:
+          # yamllint disable-line rule:line-length
+          INPUT_PERMISSION-ISSUE-FIELDS: "${{ steps.proposal.outcome == 'success' && 'read' || '' }}"
+          # yamllint disable-line rule:line-length
+          INPUT_PERMISSION-ISSUE-TYPES: "${{ steps.proposal.outcome == 'success' && 'read' || '' }}"
         with:
           client-id: "${{ inputs.github_app_client_id }}"
           private-key: "${{ secrets.github_app_private_key }}"
@@ -579,12 +662,6 @@ jobs:
           # yamllint disable-line rule:line-length
           permission-issues: "${{ !inputs.dry_run && needs.propose.result == 'success' && steps.proposal.outcome == 'success' && 'write' || 'read' }}"
           permission-metadata: 'read'
-          # These org grants read definitions, not issue values.
-          # The pinned action forwards undeclared permission inputs.
-          # yamllint disable-line rule:line-length
-          permission-issue-fields: "${{ steps.proposal.outcome == 'success' && 'read' || '' }}"
-          # yamllint disable-line rule:line-length
-          permission-issue-types: "${{ steps.proposal.outcome == 'success' && 'read' || '' }}"
 
       - name: 'Apply triage proposal'
         id: apply
