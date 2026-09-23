@@ -103,7 +103,7 @@ repos:
   # 'uses:' and job-level reusable workflow calls, so the exception is
   # no longer required.
   - repo: https://github.com/kjanat/actionlint
-    rev: 47efe1ba4cf07dce1715c79c98264c636a0ed7a7  # frozen: github-actions-expressions-of-concern
+    rev: 08bb2c4f0d039744455b87aef1c647fb8b66d37b  # frozen: v1.17.0
     hooks:
       - id: actionlint
 
