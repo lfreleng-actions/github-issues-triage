@@ -16,7 +16,7 @@ proposals; trusted jobs perform GitHub reads and writes.
 | `engine` input | `copilot` |
 | Secret | `copilot_token` |
 | Default model | `claude-sonnet-5` |
-| Harness | `@github/copilot`, pinned npm version |
+| Harness | `@github/copilot`, locked in `tools/copilot-cli/` |
 | Turn ceiling | `max_turns` has no effect; the step timeout is 20 minutes |
 | Apply path | Separate trusted runner; see [Design §13.7](../development/DESIGN.md) |
 
