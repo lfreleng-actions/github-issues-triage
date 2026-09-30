@@ -369,6 +369,34 @@ class WorkflowContractTests(WorkflowCase):
         )
         self.assertIn("--available-tools=bash,list_bash,read_bash,stop_bash", script)
 
+    def test_copilot_cli_lockfile_pins_the_whole_tree(self) -> None:
+        """The lockfile, not a version argument, is what pins the CLI.
+
+        npm ci trusts whatever the lockfile says, so an entry without an
+        integrity hash, resolved off the registry, or carrying an install
+        script would weaken the pin without failing the install.
+        """
+        pin = ROOT / "tools" / "copilot-cli"
+        manifest = json.loads((pin / "package.json").read_text(encoding="utf-8"))
+        lock = json.loads((pin / "package-lock.json").read_text(encoding="utf-8"))
+        version = manifest["dependencies"]["@github/copilot"]
+        self.assertRegex(version, r"^\d+\.\d+\.\d+$")
+        self.assertEqual(lock["packages"][""]["dependencies"], manifest["dependencies"])
+        packages = {k: v for k, v in lock["packages"].items() if k}
+        self.assertEqual(packages["node_modules/@github/copilot"]["version"], version)
+        for name, entry in packages.items():
+            self.assertRegex(entry.get("integrity", ""), r"^sha512-", name)
+            self.assertTrue(
+                entry.get("resolved", "").startswith("https://registry.npmjs.org/"),
+                name,
+            )
+            self.assertNotIn("hasInstallScript", entry, name)
+        self.assert_before("propose", "Require pinned assets", "Install Copilot CLI")
+        self.assert_before("propose", "Checkout prompt assets", "Install Copilot CLI")
+        self.assert_before(
+            "propose", "Install Copilot CLI", "Run triage agent (Copilot)"
+        )
+
     def test_allow_list_blesses_no_command_capable_interpreter(self) -> None:
         """An allowed interpreter would bypass the write, gh and git denials.
 
@@ -588,6 +616,52 @@ class WorkflowScriptTests(WorkflowCase):
         )
         self.assertNotEqual(result.returncode, 0)
         self.assertNotIn("Cleared", result.stdout)
+
+    def test_copilot_cli_installs_from_the_committed_lockfile(self) -> None:
+        """Run the real install against the committed pin, with npm stubbed.
+
+        npm ci is only a pin if it sees the lockfile: the files must be
+        copied intact, npm must run in their directory with scripts off,
+        and the CLI must reach PATH from there rather than globally.
+        """
+        (self.root / "triage-assets").symlink_to(ROOT)
+        runner_temp = self.root / "runner-temp"
+        runner_temp.mkdir()
+        github_path = self.root / "github-path"
+        npm_log = self.root / "npm-log"
+        npm = self.root / "bin" / "npm"
+        npm.write_text(
+            '#!/bin/sh\nprintf "%s\\n" "$PWD" "$@" > "$NPM_LOG"\n', encoding="utf-8"
+        )
+        npm.chmod(0o755)
+        step = self.step("propose", "Install Copilot CLI")
+
+        result = self.run_step(
+            "propose",
+            "Install Copilot CLI",
+            **step["env"],
+            RUNNER_TEMP=str(runner_temp),
+            GITHUB_PATH=str(github_path),
+            NPM_LOG=str(npm_log),
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        dest = runner_temp / "copilot-cli"
+        for name in ("package.json", "package-lock.json", ".npmrc"):
+            self.assertEqual(
+                (dest / name).read_bytes(),
+                (ROOT / "tools" / "copilot-cli" / name).read_bytes(),
+                name,
+            )
+        cwd, *arguments = npm_log.read_text(encoding="utf-8").splitlines()
+        self.assertEqual(Path(cwd).resolve(), dest.resolve())
+        self.assertEqual(
+            arguments, ["ci", "--ignore-scripts", "--no-audit", "--no-fund"]
+        )
+        self.assertEqual(
+            github_path.read_text(encoding="utf-8").splitlines(),
+            [str(dest / "node_modules" / ".bin")],
+        )
 
     bash: str
 

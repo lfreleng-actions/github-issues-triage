@@ -408,7 +408,10 @@ the trusted report. This engine is outside active validation.
 ### 13.1 Harness
 
 The workflow installs `@github/copilot` at `1.0.80` with Node 22 and
-invokes `copilot --prompt`. `model` defaults to `claude-sonnet-5`.
+invokes `copilot --prompt`. `tools/copilot-cli/package-lock.json` pins
+that version and every package beneath it by hash; the workflow runs
+`npm ci --ignore-scripts` on it from the verified assets checkout.
+`model` defaults to `claude-sonnet-5`.
 CLI logs and the `--share` summary go to the separate session
 artefact. The summary supplies the proposal; logs do not permit
 writes.
