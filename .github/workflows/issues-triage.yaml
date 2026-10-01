@@ -88,12 +88,21 @@ on:
 
 permissions: {}
 
-# Hold the lock across preparation, proposal and application, not
-# separately per stage. Different caller repositories need external
-# coordination if they target the same estate. GitHub can supersede
-# older pending runs; cancel-in-progress does not provide a FIFO queue.
+# Live runs hold one lock across preparation, proposal and application
+# per caller repository and owner, not separately per stage. Different
+# caller repositories need external coordination if they target the
+# same estate. A group keeps one pending entry and a newcomer cancels
+# it; cancel-in-progress does not change that. Dry runs write nothing,
+# so they lock within their own caller run instead, and this lock never
+# makes them cancel one another or a live run. A caller's own group
+# applies first, so callers must keep dry runs out of it as well.
+# Invocations in one run share the dry group, so a caller must not fan
+# out more than two same-owner dry runs per run.
 concurrency:
-  group: "triage-pipeline-${{ github.repository }}-${{ inputs.org }}"
+  group: >-
+    ${{ inputs.dry_run
+    && format('triage-dry-run-{0}-{1}', github.run_id, inputs.org)
+    || format('triage-pipeline-{0}-{1}', github.repository, inputs.org) }}
   cancel-in-progress: false
 
 jobs:

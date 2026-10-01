@@ -96,16 +96,52 @@ class WorkflowContractTests(WorkflowCase):
             self.assertNotIn("write", job["permissions"].values())
 
     def test_concurrency_lock_encompasses_all_three_stages(self) -> None:
-        """One caller-repository/org lock survives transitions between pipeline jobs."""
+        """Live runs share one lock; dry runs lock within their caller run."""
         concurrency = self.workflow["concurrency"]
-        self.assertEqual(
+        # The live operand must keep the historical group so an upgrade
+        # still serialises against runs already holding the old lock.
+        self.assert_expression(
             concurrency["group"],
-            "triage-pipeline-${{ github.repository }}-${{ inputs.org }}",
+            "inputs.dry_run"
+            " && format('triage-dry-run-{0}-{1}', github.run_id, inputs.org)"
+            " || format('triage-pipeline-{0}-{1}', github.repository, inputs.org)",
         )
         self.assertIs(concurrency["cancel-in-progress"], False)
         for name, job in self.jobs.items():
             with self.subTest(job=name):
                 self.assertNotIn("concurrency", job)
+
+    def test_pull_request_plumbing_cannot_cancel_its_own_legs(self) -> None:
+        """Dry legs stay in their run's group, which holds one running and one pending."""
+        testing: dict[str, Any] = yaml.safe_load(
+            (WORKFLOW.parent / "testing.yaml").read_text(encoding="utf-8")
+        )
+        plumbing = testing["jobs"]["plumbing"]
+        self.assertIs(plumbing["with"]["dry_run"], True)
+        self.assertLessEqual(len(plumbing["strategy"]["matrix"]["invocation"]), 2)
+
+    def test_caller_groups_keep_dry_dispatches_apart(self) -> None:
+        """Caller locks apply first, so dry dispatches need groups of their own."""
+        callers = {
+            "issues-triage-cron.yaml": (
+                "github.event_name == 'workflow_dispatch' && inputs.dry_run"
+                " && format('issues-triage-dry-run-{0}', github.run_id)"
+                " || 'issues-triage'",
+                False,
+            ),
+            "testing.yaml": (
+                "format('testing-{0}', github.event_name == 'pull_request'"
+                " && github.ref || github.run_id)",
+                True,
+            ),
+        }
+        for name, (group, cancel) in callers.items():
+            with self.subTest(caller=name):
+                caller: dict[str, Any] = yaml.safe_load(
+                    (WORKFLOW.parent / name).read_text(encoding="utf-8")
+                )
+                self.assert_expression(caller["concurrency"]["group"], group)
+                self.assertIs(caller["concurrency"]["cancel-in-progress"], cancel)
 
     def test_propose_has_no_app_key_token_minter_or_issue_write_permission(
         self,

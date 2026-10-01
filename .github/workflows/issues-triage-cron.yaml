@@ -52,10 +52,15 @@ on:
 
 permissions: {}
 
-# Serialise this caller. GitHub may supersede older pending runs;
-# cancel-in-progress: false does not provide a FIFO queue.
+# Serialise live runs of this caller. A group keeps one pending run and
+# a newcomer cancels it, so this is not a FIFO queue. A dry dispatch
+# writes nothing and takes a group of its own: it neither waits behind
+# the schedule nor cancels a pending live run.
 concurrency:
-  group: 'issues-triage'
+  group: >-
+    ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run
+    && format('issues-triage-dry-run-{0}', github.run_id)
+    || 'issues-triage' }}
   cancel-in-progress: false
 
 jobs:
