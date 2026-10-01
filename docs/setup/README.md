@@ -146,8 +146,13 @@ an issue whose existing Priority it cannot resolve and skips any
 issue with a Priority, including during retriage.
 
 Workflow-level concurrency covers the full prepare/propose/apply
-sequence per caller repository and target owner. GitHub may supersede
-pending runs; `cancel-in-progress: false` is not a FIFO queue.
+sequence of a live run per caller repository and target owner. GitHub
+may supersede pending runs; `cancel-in-progress: false` is not a FIFO
+queue. Dry runs write nothing and lock within their own caller run,
+so this lock never makes them wait on or cancel live runs or other
+runs' dry runs. A caller's own concurrency group applies first: keep
+dry runs out of any group the caller shares with live runs, as the
+bundled scheduled caller does.
 Different callers targeting the same organisation need coordination.
 
 A run/attempt/UUID namespace avoids reusable and matrix artefact

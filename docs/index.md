@@ -86,8 +86,9 @@ read failures are fatal; dry-run alone allows known absence or
 permission denial. A search reaching 1,000 results fails before
 exclusion filtering can conceal truncation.
 
-Workflow concurrency serializes all three jobs per caller repository
-and target owner. Pending runs may supersede each other; there is
+Workflow concurrency serializes all three jobs of a live run per
+caller repository and target owner; dry runs lock within their
+own caller run. Pending runs may supersede each other; there is
 no FIFO queue or cross-caller lock. Writes are nontransactional and
 live checks do not prevent races with human edits. Inspect partial
 writes before targeted recovery; never overwrite human Priority to

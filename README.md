@@ -69,10 +69,15 @@ while their artefacts remain available. A run/attempt/UUID namespace
 avoids collisions between reusable invocations and matrix calls;
 result names add the current attempt. See [Design §13.7](docs/development/DESIGN.md).
 
-Workflow-level concurrency serializes the whole pipeline per caller
-repository and target owner. GitHub may supersede pending runs; this
-is not a FIFO queue. Different caller repositories targeting the
-same organisation need external coordination.
+Live runs hold one workflow-level lock across the whole pipeline per
+caller repository and target owner. A lock keeps one pending run and a
+newcomer cancels it, so this is not a FIFO queue. Dry runs write
+nothing and lock within their own caller run, so this lock never makes
+them cancel each other or a live run. A caller's own concurrency group
+applies first: the bundled callers give dry dispatches groups of their
+own, and other callers should keep dry runs out of shared groups too.
+Different caller repositories targeting the same organisation need
+external coordination.
 
 ## Consuming the reusable workflow
 

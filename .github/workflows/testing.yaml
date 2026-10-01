@@ -33,8 +33,13 @@ on:
 
 permissions: {}
 
+# A new push to a pull request supersedes that pull request's older
+# run. Each manual dispatch takes a group of its own, so a second
+# dispatch never cancels an agent session already in flight.
 concurrency:
-  group: "testing-${{ github.ref }}"
+  group: >-
+    ${{ format('testing-{0}', github.event_name == 'pull_request'
+    && github.ref || github.run_id) }}
   cancel-in-progress: true
 
 jobs:
@@ -42,6 +47,9 @@ jobs:
     name: 'Plumbing (secretless, ${{ matrix.invocation }})'
     strategy:
       matrix:
+        # Two legs prove invocation namespaces never collide. Both are
+        # dry, so they share only this run's lock: one runs, one waits.
+        # A third leg would take the single pending slot and cancel one.
         invocation: [first, second]
     if: github.event_name == 'pull_request'
     permissions:

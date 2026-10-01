@@ -182,11 +182,31 @@ apply: trusted runner, 15 minutes <------------+
 
 Workflow-level concurrency uses
 `triage-pipeline-${{ github.repository }}-${{ inputs.org }}` with
-`cancel-in-progress: false`. The lock covers the full three-job
-sequence, not each stage independently. GitHub may supersede pending
-runs; this is not a FIFO queue. Different caller repositories need
-external coordination when targeting the same organisation.
-Concurrency does not exclude human edits or unrelated automation.
+`cancel-in-progress: false` for live runs. The lock covers the full
+three-job sequence, not each stage independently. A group holds one
+running and one pending run; a newcomer cancels the pending one, so
+this is not a FIFO queue. Different caller repositories need external
+coordination when targeting the same organisation. Concurrency does
+not exclude human edits or unrelated automation.
+
+Dry runs take `triage-dry-run-${{ github.run_id }}-${{ inputs.org }}`
+instead. They mint no write token and skip every write, so they need
+no protection from live runs. Sharing the live group let simultaneous
+pull request checks cancel one another's pending plumbing
+invocations, failing the Testing workflow. Invocations inside one
+caller run still share a dry-run group, which is why the plumbing
+matrix stops at two legs. A dry-run report can show a concurrent live
+run's writes in its snapshot diff; `apply-result.json` records what
+the run itself would apply.
+
+A caller's workflow-level group applies before this lock, so the
+guarantee above holds for this lock alone. The bundled callers keep
+dry runs out of shared groups. The scheduled caller places dry
+dispatches in `issues-triage-dry-run-${{ github.run_id }}`, so they
+neither wait behind the schedule nor cancel a pending live run. The
+Testing caller keys pull requests on their ref, so a new push
+supersedes that pull request's older run, and gives each manual
+dispatch its run ID, so one agent dry run never cancels another.
 
 ### 7.1 Egress
 
@@ -606,8 +626,9 @@ current state and `apply-result.json` before targeted recovery, often
 with `retriage: true` after a label write. Never overwrite a human
 Priority to force replay; the existing-Priority guard still applies.
 
-The workflow lock serializes the full sequence per caller repository
-and owner (§7), but cannot exclude cross-caller or human edits.
+The workflow lock serializes the full live sequence per caller
+repository and owner (§7), but cannot exclude cross-caller or human
+edits.
 Fresh reads reduce stale decisions without eliminating the race
 between validation and writes. Cancellation also cannot undo a
 request that already succeeded.
